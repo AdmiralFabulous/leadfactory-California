@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Health - LeadFactory{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-4">Agent Health Monitoring</h1>
+
+<!-- Overall Status -->
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0"><i class="bi bi-activity"></i> System Status</h5>
+                <span class="badge bg-success" id="system-status">Operational</span>
+            </div>
+            <div class="row">
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="text-muted small">Last Run</div>
+                        <div class="h6" id="last-run">Never</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="text-muted small">Total Runs</div>
+                        <div class="h6" id="total-runs">0</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="text-muted small">Success Rate</div>
+                        <div class="h6" id="success-rate">100%</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="text-center">
+                        <div class="text-muted small">Avg Duration</div>
+                        <div class="h6" id="avg-duration">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Agent Cards -->
+<div class="row mb-4">
+    <!-- Discovery Agent -->
+    <div class="col-md-6 mb-4">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-search"></i> Discovery Agent</h6>
+                <span class="badge bg-success">Active</span>
+            </div>
+            <p class="text-muted small">Scrapes Reddit, Facebook, and forums for potential leads</p>
+            <div class="row mt-3">
+                <div class="col-6">
+                    <div class="text-muted small">Last Run</div>
+                    <div id="discovery-last">Never</div>
+                </div>
+                <div class="col-6">
+                    <div class="text-muted small">Leads Found</div>
+                    <div id="discovery-count">0</div>
+                </div>
+            </div>
+            <div class="progress mt-2" style="height: 4px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: 100%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Extraction Agent -->
+    <div class="col-md-6 mb-4">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-file-text"></i> Extraction Agent</h6>
+                <span class="badge bg-success">Active</span>
+            </div>
+            <p class="text-muted small">Uses Claude AI to extract structured lead data from text</p>
+            <div class="row mt-3">
+                <div class="col-6">
+                    <div class="text-muted small">Last Run</div>
+                    <div id="extraction-last">Never</div>
+                </div>
+                <div class="col-6">
+                    <div class="text-muted small">Extracted</div>
+                    <div id="extraction-count">0</div>
+                </div>
+            </div>
+            <div class="progress mt-2" style="height: 4px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: 100%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Enrichment Agent -->
+    <div class="col-md-6 mb-4">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-plus-circle"></i> Enrichment Agent</h6>
+                <span class="badge bg-success">Active</span>
+            </div>
+            <p class="text-muted small">Enriches leads with additional data from social profiles</p>
+            <div class="row mt-3">
+                <div class="col-6">
+                    <div class="text-muted small">Last Run</div>
+                    <div id="enrichment-last">Never</div>
+                </div>
+                <div class="col-6">
+                    <div class="text-muted small">Enriched</div>
+                    <div id="enrichment-count">0</div>
+                </div>
+            </div>
+            <div class="progress mt-2" style="height: 4px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: 100%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Qualification Agent -->
+    <div class="col-md-6 mb-4">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-check-circle"></i> Qualification Agent</h6>
+                <span class="badge bg-success">Active</span>
+            </div>
+            <p class="text-muted small">Scores leads with AI, applies CA priority boost</p>
+            <div class="row mt-3">
+                <div class="col-6">
+                    <div class="text-muted small">Last Run</div>
+                    <div id="qualification-last">Never</div>
+                </div>
+                <div class="col-6">
+                    <div class="text-muted small">Qualified</div>
+                    <div id="qualification-count">0</div>
+                </div>
+            </div>
+            <div class="progress mt-2" style="height: 4px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: 100%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Email Outreach Agent -->
+    <div class="col-md-6 mb-4">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-envelope"></i> Email Outreach Agent</h6>
+                <span class="badge bg-success">Active</span>
+            </div>
+            <p class="text-muted small">Sends personalized emails, prioritizes CA leads</p>
+            <div class="row mt-3">
+                <div class="col-6">
+                    <div class="text-muted small">Last Run</div>
+                    <div id="outreach-last">Never</div>
+                </div>
+                <div class="col-6">
+                    <div class="text-muted small">Emails Sent</div>
+                    <div id="outreach-count">0</div>
+                </div>
+            </div>
+            <div class="progress mt-2" style="height: 4px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: 100%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Persistence Agent -->
+    <div class="col-md-6 mb-4">
+        <div class="stats-card">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0"><i class="bi bi-database"></i> Persistence Agent</h6>
+                <span class="badge bg-success">Active</span>
+            </div>
+            <p class="text-muted small">Manages database operations and data integrity</p>
+            <div class="row mt-3">
+                <div class="col-6">
+                    <div class="text-muted small">Last Run</div>
+                    <div id="persistence-last">Never</div>
+                </div>
+                <div class="col-6">
+                    <div class="text-muted small">Records Saved</div>
+                    <div id="persistence-count">0</div>
+                </div>
+            </div>
+            <div class="progress mt-2" style="height: 4px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: 100%"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Agent Activity Log -->
+<div class="stats-card">
+    <h5 class="mb-3"><i class="bi bi-clock-history"></i> Recent Activity</h5>
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Agent</th>
+                    <th>Action</th>
+                    <th>Result</th>
+                    <th>Duration</th>
+                </tr>
+            </thead>
+            <tbody id="activity-log-body">
+                <tr>
+                    <td colspan="5" class="text-center text-muted">No recent activity</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function loadAgentStatus() {
+    fetch('/api/agents')
+        .then(response => response.json())
+        .then(data => {
+            // Update system status
+            document.getElementById('system-status').textContent = data.status || 'Operational';
+            document.getElementById('last-run').textContent = data.last_run || 'Never';
+            document.getElementById('total-runs').textContent = data.total_runs || 0;
+            document.getElementById('success-rate').textContent = (data.success_rate || 100) + '%';
+            document.getElementById('avg-duration').textContent = data.avg_duration || '--';
+
+            // Update agent-specific data
+            const agents = data.agents || {};
+            Object.keys(agents).forEach(agentName => {
+                const agent = agents[agentName];
+                const prefix = agentName.toLowerCase().replace(' ', '-');
+
+                const lastEl = document.getElementById(prefix + '-last');
+                const countEl = document.getElementById(prefix + '-count');
+
+                if (lastEl) lastEl.textContent = agent.last_run || 'Never';
+                if (countEl) countEl.textContent = agent.count || 0;
+            });
+
+            // Update activity log
+            updateActivityLog(data.recent_activity || []);
+        })
+        .catch(err => {
+            console.error('Error loading agent status:', err);
+            // Show mock data if API not available
+            document.getElementById('system-status').textContent = 'Operational';
+            document.getElementById('last-run').textContent = 'Mock Data';
+        });
+}
+
+function updateActivityLog(activities) {
+    const tbody = document.getElementById('activity-log-body');
+    if (!activities || activities.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No recent activity</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = activities.map(activity => {
+        const resultBadge = activity.result === 'success'
+            ? '<span class="badge bg-success">Success</span>'
+            : '<span class="badge bg-danger">Error</span>';
+
+        return `
+            <tr>
+                <td><small>${activity.timestamp || 'N/A'}</small></td>
+                <td>${activity.agent || 'Unknown'}</td>
+                <td><small>${activity.action || 'N/A'}</small></td>
+                <td>${resultBadge}</td>
+                <td><small>${activity.duration || '--'}</small></td>
+            </tr>
+        `;
+    }).join('');
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', function() {
+    loadAgentStatus();
+
+    // Auto-refresh every 10 seconds
+    setInterval(loadAgentStatus, 10000);
+});
+</script>
+{% endblock %}

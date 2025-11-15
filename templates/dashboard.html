@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - LeadFactory{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="h3 mb-0">Dashboard</h1>
+    <button class="btn btn-primary btn-action" onclick="runPipeline()">
+        <i class="bi bi-play-circle"></i> Run Pipeline Once
+    </button>
+</div>
+
+<!-- KPI Cards -->
+<div class="row">
+    <div class="col-md-3">
+        <div class="stats-card">
+            <div class="label">Total Leads</div>
+            <div class="value" id="total-leads">{{ stats.total_leads }}</div>
+            <div class="text-muted small">All time</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stats-card">
+            <div class="label">New Today</div>
+            <div class="value" id="leads-today">{{ stats.leads_today }}</div>
+            <div class="text-muted small">Created today</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stats-card">
+            <div class="label">Calls Booked Today</div>
+            <div class="value text-primary" id="calls-booked-today">
+                {{ stats.calls_booked_today }} / {{ stats.daily_call_target }}
+            </div>
+            <div class="progress mt-2" style="height: 6px;">
+                <div class="progress-bar" role="progressbar"
+                     style="width: {{ (stats.calls_booked_today / stats.daily_call_target * 100) if stats.daily_call_target > 0 else 0 }}%"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stats-card">
+            <div class="label">Avg Priority Score</div>
+            <div class="value" id="avg-priority-score">{{ stats.avg_priority_score }}</div>
+            <div class="text-muted small">With CA boost</div>
+        </div>
+    </div>
+</div>
+
+<!-- CA vs Non-CA -->
+<div class="row">
+    <div class="col-md-6">
+        <div class="stats-card">
+            <div class="label">CA Priority Leads</div>
+            <div class="value text-success" id="ca-leads">{{ stats.ca_priority_leads }}</div>
+            <span class="badge badge-ca">{{ stats.ca_share_pct }}% of total</span>
+            <p class="mt-2 mb-0 text-muted small">
+                <i class="bi bi-info-circle"></i> CA leads are prioritized, but all leads remain workable
+            </p>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="stats-card">
+            <div class="label">Non-CA Leads</div>
+            <div class="value text-secondary" id="non-ca-leads">{{ stats.non_ca_leads }}</div>
+            <span class="badge badge-non-ca">Fully visible & workable</span>
+            <p class="mt-2 mb-0 text-muted small">
+                <i class="bi bi-check-circle"></i> Non-CA leads are included in the pipeline
+            </p>
+        </div>
+    </div>
+</div>
+
+<!-- Funnel Chart -->
+<div class="row">
+    <div class="col-md-8">
+        <div class="stats-card">
+            <h5 class="mb-3">Pipeline Funnel</h5>
+            <div class="chart-container">
+                <canvas id="funnel-chart"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="stats-card">
+            <h5 class="mb-3">CA vs Non-CA</h5>
+            <div class="chart-container">
+                <canvas id="ca-chart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Channel Performance -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="stats-card">
+            <h5 class="mb-3">Channel Performance</h5>
+            <div class="chart-container">
+                <canvas id="channel-chart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Time Series -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="stats-card">
+            <h5 class="mb-3">Leads Over Time (30 Days)</h5>
+            <div class="chart-container">
+                <canvas id="timeseries-chart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Funnel Chart
+const funnelCtx = document.getElementById('funnel-chart').getContext('2d');
+new Chart(funnelCtx, {
+    type: 'bar',
+    data: {
+        labels: ['Raw', 'Enriched', 'Qualified', 'Contacted', 'Responded', 'Interested', 'Booked', 'Converted'],
+        datasets: [{
+            label: 'Leads',
+            data: [
+                {{ funnel.raw }},
+                {{ funnel.enriched }},
+                {{ funnel.qualified }},
+                {{ funnel.contacted }},
+                {{ funnel.responded }},
+                {{ funnel.interested }},
+                {{ funnel.call_booked }},
+                {{ funnel.converted }}
+            ],
+            backgroundColor: 'rgba(13, 110, 253, 0.8)',
+        }]
+    },
+    options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false }
+        },
+        scales: {
+            x: { beginAtZero: true }
+        }
+    }
+});
+
+// CA vs Non-CA Pie Chart
+const caCtx = document.getElementById('ca-chart').getContext('2d');
+new Chart(caCtx, {
+    type: 'doughnut',
+    data: {
+        labels: ['CA Priority', 'Non-CA'],
+        datasets: [{
+            data: [{{ stats.ca_priority_leads }}, {{ stats.non_ca_leads }}],
+            backgroundColor: ['#22c55e', '#64748b'],
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { position: 'bottom' }
+        }
+    }
+});
+
+// Channel Performance Chart
+const channelCtx = document.getElementById('channel-chart').getContext('2d');
+new Chart(channelCtx, {
+    type: 'bar',
+    data: {
+        labels: {{ channels|map(attribute='platform')|list|tojson }},
+        datasets: [
+            {
+                label: 'CA Priority',
+                data: {{ channels|map(attribute='ca_count')|list|tojson }},
+                backgroundColor: '#22c55e',
+            },
+            {
+                label: 'Non-CA',
+                data: {{ channels|map(attribute='non_ca_count')|list|tojson }},
+                backgroundColor: '#64748b',
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            x: { stacked: true },
+            y: { stacked: true, beginAtZero: true }
+        }
+    }
+});
+
+// Time Series Chart
+const timeseriesCtx = document.getElementById('timeseries-chart').getContext('2d');
+new Chart(timeseriesCtx, {
+    type: 'line',
+    data: {
+        labels: {{ time_series.dates|tojson }},
+        datasets: [{
+            label: 'New Leads',
+            data: {{ time_series.new_leads|tojson }},
+            borderColor: '#0d6efd',
+            backgroundColor: 'rgba(13, 110, 253, 0.1)',
+            fill: true,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: { beginAtZero: true }
+        }
+    }
+});
+
+// Auto-refresh
+function refreshDashboard() {
+    fetch('/api/progress')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('total-leads').textContent = data.total_leads;
+            document.getElementById('leads-today').textContent = data.leads_today;
+            document.getElementById('calls-booked-today').textContent =
+                `${data.calls_booked_today} / ${data.daily_call_target}`;
+            document.getElementById('avg-priority-score').textContent = data.avg_priority_score;
+            document.getElementById('ca-leads').textContent = data.ca_priority_leads;
+            document.getElementById('non-ca-leads').textContent = data.non_ca_leads;
+        })
+        .catch(err => console.error('Refresh failed:', err));
+}
+
+// Refresh every 5 seconds
+setInterval(refreshDashboard, 5000);
+
+// Run pipeline action
+function runPipeline() {
+    if (!confirm('Start a full pipeline run?')) return;
+
+    fetch('/actions/run_once', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Pipeline started successfully!');
+            } else {
+                alert('Error: ' + data.error);
+            }
+        })
+        .catch(err => alert('Error starting pipeline: ' + err));
+}
+</script>
+{% endblock %}

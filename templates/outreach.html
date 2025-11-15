@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+
+{% block title %}Outreach & Bookings - LeadFactory{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-4">Outreach & Bookings</h1>
+
+<!-- Today's Progress -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="stats-card text-center">
+            <div class="text-muted small">Outreach Sent Today</div>
+            <div class="h2 mb-0" id="outreach-today">0</div>
+            <small class="text-muted">of <span id="outreach-limit">40</span> daily limit</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stats-card text-center">
+            <div class="text-muted small">Responses Today</div>
+            <div class="h2 mb-0" id="responses-today">0</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stats-card text-center">
+            <div class="text-muted small">Calls Booked Today</div>
+            <div class="h2 mb-0" id="calls-today">0</div>
+            <small class="text-muted">of <span id="call-target">4</span> target</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stats-card text-center">
+            <div class="text-muted small">Conversion Rate</div>
+            <div class="h2 mb-0" id="conversion-rate">0%</div>
+            <small class="text-muted">response to booking</small>
+        </div>
+    </div>
+</div>
+
+<!-- Email Performance -->
+<div class="row mb-4">
+    <div class="col-md-8">
+        <div class="stats-card">
+            <h5 class="mb-3"><i class="bi bi-envelope"></i> Email Performance</h5>
+            <div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Total</th>
+                            <th>CA Priority</th>
+                            <th>Non-CA</th>
+                            <th>Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Sent</td>
+                            <td id="sent-total">0</td>
+                            <td><span class="badge bg-success" id="sent-ca">0</span></td>
+                            <td id="sent-nonca">0</td>
+                            <td>100%</td>
+                        </tr>
+                        <tr>
+                            <td>Delivered</td>
+                            <td id="delivered-total">0</td>
+                            <td><span class="badge bg-success" id="delivered-ca">0</span></td>
+                            <td id="delivered-nonca">0</td>
+                            <td id="delivered-rate">--%</td>
+                        </tr>
+                        <tr>
+                            <td>Opened (est.)</td>
+                            <td id="opened-total">0</td>
+                            <td><span class="badge bg-success" id="opened-ca">0</span></td>
+                            <td id="opened-nonca">0</td>
+                            <td id="opened-rate">--%</td>
+                        </tr>
+                        <tr>
+                            <td>Responded</td>
+                            <td id="responded-total">0</td>
+                            <td><span class="badge bg-success" id="responded-ca">0</span></td>
+                            <td id="responded-nonca">0</td>
+                            <td id="responded-rate">--%</td>
+                        </tr>
+                        <tr class="table-success">
+                            <td><strong>Booked Call</strong></td>
+                            <td id="booked-total">0</td>
+                            <td><span class="badge bg-success" id="booked-ca">0</span></td>
+                            <td id="booked-nonca">0</td>
+                            <td id="booked-rate">--%</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="stats-card">
+            <h5 class="mb-3"><i class="bi bi-calendar-check"></i> This Week</h5>
+            <canvas id="weeklyChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Outreach -->
+<div class="stats-card mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0"><i class="bi bi-send"></i> Recent Outreach</h5>
+        <a href="{{ url_for('leads') }}" class="btn btn-sm btn-outline-primary">View All Leads</a>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Location</th>
+                    <th>Priority</th>
+                    <th>Sent</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="recent-outreach-body">
+                <tr>
+                    <td colspan="7" class="text-center text-muted">Loading...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Upcoming Calls -->
+<div class="stats-card">
+    <h5 class="mb-3"><i class="bi bi-telephone"></i> Upcoming Calls</h5>
+    <div id="upcoming-calls">
+        <p class="text-muted">No upcoming calls scheduled.</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let weeklyChart;
+
+function loadOutreachData() {
+    fetch('/api/progress')
+        .then(response => response.json())
+        .then(data => {
+            // Update top metrics
+            document.getElementById('outreach-today').textContent = data.outreach_today || 0;
+            document.getElementById('outreach-limit').textContent = data.outreach_limit || 40;
+            document.getElementById('responses-today').textContent = data.responses_today || 0;
+            document.getElementById('calls-today').textContent = data.calls_booked_today || 0;
+            document.getElementById('call-target').textContent = data.daily_call_target || 4;
+
+            const responseRate = data.responses_today > 0 && data.calls_booked_today > 0
+                ? ((data.calls_booked_today / data.responses_today) * 100).toFixed(1)
+                : '0.0';
+            document.getElementById('conversion-rate').textContent = responseRate + '%';
+
+            // Update email performance table
+            const funnel = data.funnel || {};
+            const caShare = data.ca_share_pct || 0;
+
+            const sent = funnel.contacted || 0;
+            const responded = funnel.responded || 0;
+            const booked = funnel.call_booked || 0;
+
+            const sentCa = Math.floor(sent * caShare / 100);
+            const respondedCa = Math.floor(responded * caShare / 100);
+            const bookedCa = Math.floor(booked * caShare / 100);
+
+            document.getElementById('sent-total').textContent = sent;
+            document.getElementById('sent-ca').textContent = sentCa;
+            document.getElementById('sent-nonca').textContent = sent - sentCa;
+
+            document.getElementById('responded-total').textContent = responded;
+            document.getElementById('responded-ca').textContent = respondedCa;
+            document.getElementById('responded-nonca').textContent = responded - respondedCa;
+            document.getElementById('responded-rate').textContent = sent > 0 ? ((responded / sent) * 100).toFixed(1) + '%' : '--';
+
+            document.getElementById('booked-total').textContent = booked;
+            document.getElementById('booked-ca').textContent = bookedCa;
+            document.getElementById('booked-nonca').textContent = booked - bookedCa;
+            document.getElementById('booked-rate').textContent = responded > 0 ? ((booked / responded) * 100).toFixed(1) + '%' : '--';
+
+            // Estimate delivered/opened (placeholder logic)
+            const delivered = Math.floor(sent * 0.95);
+            const opened = Math.floor(sent * 0.30);
+            document.getElementById('delivered-total').textContent = delivered;
+            document.getElementById('delivered-ca').textContent = Math.floor(delivered * caShare / 100);
+            document.getElementById('delivered-nonca').textContent = delivered - Math.floor(delivered * caShare / 100);
+            document.getElementById('delivered-rate').textContent = sent > 0 ? ((delivered / sent) * 100).toFixed(1) + '%' : '--';
+
+            document.getElementById('opened-total').textContent = opened;
+            document.getElementById('opened-ca').textContent = Math.floor(opened * caShare / 100);
+            document.getElementById('opened-nonca').textContent = opened - Math.floor(opened * caShare / 100);
+            document.getElementById('opened-rate').textContent = sent > 0 ? ((opened / sent) * 100).toFixed(1) + '%' : '--';
+        })
+        .catch(err => console.error('Error loading outreach data:', err));
+
+    // Load recent outreach
+    fetch('/api/leads?limit=15')
+        .then(response => response.json())
+        .then(leads => {
+            const tbody = document.getElementById('recent-outreach-body');
+            if (!leads || leads.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No outreach sent yet</td></tr>';
+                return;
+            }
+
+            const contacted = leads.filter(l => l.contacted || l.stage === 'contacted' || l.stage === 'responded' || l.stage === 'call_booked');
+            if (contacted.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No outreach sent yet</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = contacted.slice(0, 15).map(lead => {
+                const statusBadge = lead.stage === 'responded' ? '<span class="badge bg-info">Responded</span>' :
+                                   lead.stage === 'call_booked' ? '<span class="badge bg-success">Call Booked</span>' :
+                                   '<span class="badge bg-secondary">Sent</span>';
+
+                const caBadge = lead.is_ca_priority ? '<span class="badge bg-success">CA</span>' : '<span class="badge bg-secondary">General</span>';
+
+                return `
+                    <tr ${lead.is_ca_priority ? 'class="table-row-ca"' : ''}>
+                        <td>${lead.name || 'Unknown'}</td>
+                        <td><small>${lead.email || 'N/A'}</small></td>
+                        <td><small>${lead.location || lead.city || 'N/A'}</small></td>
+                        <td>${lead.priority_score ? lead.priority_score.toFixed(1) : 'N/A'}</td>
+                        <td><small>${lead.created_at ? new Date(lead.created_at).toLocaleDateString() : 'N/A'}</small></td>
+                        <td>${statusBadge}</td>
+                        <td>${caBadge}</td>
+                    </tr>
+                `;
+            }).join('');
+        })
+        .catch(err => console.error('Error loading recent outreach:', err));
+}
+
+// Initialize chart
+document.addEventListener('DOMContentLoaded', function() {
+    const weeklyCtx = document.getElementById('weeklyChart').getContext('2d');
+    weeklyChart = new Chart(weeklyCtx, {
+        type: 'line',
+        data: {
+            labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+            datasets: [{
+                label: 'Calls Booked',
+                data: [0, 0, 0, 0, 0, 0, 0],
+                borderColor: '#22c55e',
+                backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                tension: 0.3
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                y: { beginAtZero: true, grid: { color: '#1e293b' } },
+                x: { grid: { display: false } }
+            }
+        }
+    });
+
+    // Load initial data
+    loadOutreachData();
+
+    // Auto-refresh every 10 seconds
+    setInterval(loadOutreachData, 10000);
+});
+</script>
+{% endblock %}

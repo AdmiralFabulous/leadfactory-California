@@ -1,22 +1,31 @@
-# dashboard.py
+"""
+LeadFactory California - Control Center Dashboard
+Complete visual interface for monitoring and managing the lead generation system.
+"""
 
 import os
 import re
-from datetime import date, datetime
+import json
+import subprocess
+import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
+from collections import defaultdict
 
 from flask import (
     Flask,
     jsonify,
     redirect,
-    render_template_string,
+    render_template,
     request,
+    send_file,
     url_for,
     flash,
 )
-from sqlalchemy import create_engine, MetaData, select
+from sqlalchemy import create_engine, MetaData, select, func, and_, or_
 from sqlalchemy.engine import Engine
+from dotenv import dotenv_values, set_key
 
 from ca_priority import apply_ca_priority, is_california_location
 
@@ -24,191 +33,404 @@ from ca_priority import apply_ca_priority, is_california_location
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "leadfactory.db"
 ENV_PATH = BASE_DIR / ".env"
+LOG_PATH = BASE_DIR / "data" / "logs" / "leadfactory.log"
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("DASHBOARD_SECRET_KEY", "change-me-please")
+app.secret_key = os.environ.get("DASHBOARD_SECRET_KEY", "leadfactory-secret-change-me")
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 
+
+# ==============================================================================
+# DATABASE CONNECTION
+# ==============================================================================
 
 def create_db_engine() -> Engine:
     if not DB_PATH.exists():
         print(f"[dashboard] WARNING: database file not found at {DB_PATH}")
+        # Create data directory if it doesn't exist
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite:///{DB_PATH}"
-    return create_engine(url, future=True)
+    return create_engine(url, future=True, pool_pre_ping=True)
 
 
 engine: Engine = create_db_engine()
 metadata = MetaData()
 
-with engine.connect() as conn:
-    metadata.reflect(bind=conn)
+try:
+    with engine.connect() as conn:
+        metadata.reflect(bind=conn)
+except Exception as e:
+    print(f"[dashboard] Could not reflect database: {e}")
 
 
-def find_leads_table():
-    """
-    Try to find a table whose name contains 'lead' – works with typical schemas
-    like 'leads', 'lead', 'lead_records', etc.
-    """
+def find_table(name_pattern: str):
+    """Find a table whose name contains the pattern."""
     for name, table in metadata.tables.items():
-        if "lead" in name.lower():
+        if name_pattern.lower() in name.lower():
             return table
     return None
 
 
-LEADS_TABLE = find_leads_table()
+LEADS_TABLE = find_table("lead")
+OUTREACH_TABLE = find_table("outreach")
+MEETINGS_TABLE = find_table("meeting")
 
 
-def _first_existing_column(row: Dict[str, Any], *candidates: str) -> str:
-    for key in candidates:
-        if key in row and row[key]:
-            return str(row[key])
-    return ""
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
+def _safe_get(row: Dict, *keys: str, default: Any = None) -> Any:
+    """Safely get value from dict with fallback keys."""
+    for key in keys:
+        if key in row and row[key] is not None:
+            return row[key]
+    return default
 
 
 def _format_dt(value: Any) -> str:
+    """Format datetime for display."""
     if not value:
         return ""
     if isinstance(value, (datetime, date)):
-        return value.isoformat(sep=" ", timespec="seconds")
+        return value.strftime("%Y-%m-%d %H:%M")
     return str(value)
 
 
-def fetch_recent_leads(limit: int = 200) -> List[Dict[str, Any]]:
-    """
-    Fetch recent leads from the database, annotate with CA priority metadata, and
-    sort by priority_score descending.
-    """
-    if LEADS_TABLE is None:
-        return []
-
-    with engine.connect() as conn:
-        columns = list(LEADS_TABLE.c.keys())
-        if "created_at" in LEADS_TABLE.c:
-            order_col = LEADS_TABLE.c.created_at
-        elif "created" in LEADS_TABLE.c:
-            order_col = LEADS_TABLE.c.created
-        elif "id" in LEADS_TABLE.c:
-            order_col = LEADS_TABLE.c.id
-        else:
-            # Fallback: first column
-            order_col = LEADS_TABLE.c[columns[0]]
-
-        stmt = (
-            select(LEADS_TABLE)
-            .order_by(order_col.desc())
-            .limit(limit)
-        )
-        rows = conn.execute(stmt).mappings().all()
-
-    leads: List[Dict[str, Any]] = []
-
-    for row in rows:
-        data = dict(row)
-
-        # Determine location field heuristically
-        location_value = _first_existing_column(
-            data,
-            "location",
-            "city",
-            "region",
-            "state",
-            "country",
-            "geo",
-        )
-
-        # Determine base score (if any)
-        base_score_raw = data.get("priority_score", data.get("score"))
-        try:
-            base_score = float(base_score_raw) if base_score_raw is not None else 0.0
-        except (TypeError, ValueError):
-            base_score = 0.0
-
-        # If the DB already has explicit CA flags, respect them; otherwise derive.
-        existing_is_ca = data.get("is_ca_priority")
-        derived_priority_score, derived_is_ca = apply_ca_priority(
-            base_score=base_score,
-            location=location_value,
-        )
-
-        if isinstance(existing_is_ca, bool):
-            is_ca_priority = existing_is_ca or derived_is_ca
-        else:
-            is_ca_priority = derived_is_ca
-
-        if "priority_score" in data and data["priority_score"] is not None:
-            priority_score = float(data["priority_score"])
-        else:
-            priority_score = derived_priority_score
-
-        data["__location"] = location_value
-        data["__is_ca_priority"] = bool(is_ca_priority)
-        data["__base_score"] = float(base_score)
-        data["__priority_score"] = float(priority_score)
-
-        # Normalised friendly fields for display
-        data["__display_name"] = data.get("name") or data.get("full_name") or ""
-        data["__display_email"] = data.get("email") or data.get("primary_email") or ""
-        data["__display_source"] = data.get("source") or data.get("channel") or ""
-        data["__display_stage"] = data.get("status") or data.get("stage") or ""
-        data["__display_created_at"] = _format_dt(
-            data.get("created_at") or data.get("created")
-        )
-
-        leads.append(data)
-
-    leads.sort(key=lambda r: r["__priority_score"], reverse=True)
-    return leads
+def _format_date(value: Any) -> str:
+    """Format date for display."""
+    if not value:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
 
 
-def compute_metrics() -> Dict[str, Any]:
-    """
-    Aggregate high-level metrics for the overview page and API.
-    """
-    metrics: Dict[str, Any] = {
+# ==============================================================================
+# METRICS & DATA FUNCTIONS
+# ==============================================================================
+
+def get_global_stats() -> Dict[str, Any]:
+    """Get high-level system statistics."""
+    stats = {
         "total_leads": 0,
-        "ca_leads": 0,
+        "leads_today": 0,
+        "calls_booked_today": 0,
+        "calls_booked_total": 0,
+        "daily_call_target": int(os.getenv("DAILY_CALL_TARGET", "4")),
+        "ca_priority_leads": 0,
         "non_ca_leads": 0,
-        "today_leads": 0,
-        "avg_priority_score": 0.0,
         "ca_share_pct": 0.0,
+        "avg_priority_score": 0.0,
+        "max_daily_outreach": int(os.getenv("MAX_DAILY_OUTREACH", "40")),
+        "outreach_sent_today": 0,
     }
 
-    leads = fetch_recent_leads(limit=10000)
-    if not leads:
-        return metrics
+    if LEADS_TABLE is None:
+        return stats
 
-    today_iso = date.today().isoformat()
-    scores: List[float] = []
+    try:
+        with engine.connect() as conn:
+            # Total leads
+            result = conn.execute(select(func.count()).select_from(LEADS_TABLE))
+            stats["total_leads"] = result.scalar() or 0
 
-    for lead in leads:
-        metrics["total_leads"] += 1
+            # Today's date
+            today = date.today().isoformat()
 
-        if lead["__is_ca_priority"]:
-            metrics["ca_leads"] += 1
-        else:
-            metrics["non_ca_leads"] += 1
+            # Leads created today
+            if "created_at" in LEADS_TABLE.c:
+                stmt = select(func.count()).where(
+                    func.date(LEADS_TABLE.c.created_at) == today
+                )
+                result = conn.execute(stmt)
+                stats["leads_today"] = result.scalar() or 0
 
-        created_str = lead.get("__display_created_at") or ""
-        if created_str.startswith(today_iso):
-            metrics["today_leads"] += 1
+            # CA priority stats
+            if "is_ca_priority" in LEADS_TABLE.c:
+                stmt = select(func.count()).where(LEADS_TABLE.c.is_ca_priority == True)
+                result = conn.execute(stmt)
+                stats["ca_priority_leads"] = result.scalar() or 0
+                stats["non_ca_leads"] = stats["total_leads"] - stats["ca_priority_leads"]
 
-        scores.append(lead["__priority_score"])
+            # CA share percentage
+            if stats["total_leads"] > 0:
+                stats["ca_share_pct"] = round(
+                    (stats["ca_priority_leads"] / stats["total_leads"]) * 100, 1
+                )
 
-    if scores:
-        metrics["avg_priority_score"] = round(
-            sum(scores) / max(len(scores), 1),
-            2,
-        )
+            # Average priority score
+            if "priority_score" in LEADS_TABLE.c:
+                stmt = select(func.avg(LEADS_TABLE.c.priority_score))
+                result = conn.execute(stmt)
+                avg = result.scalar()
+                stats["avg_priority_score"] = round(float(avg), 2) if avg else 0.0
 
-    if metrics["total_leads"] > 0:
-        metrics["ca_share_pct"] = round(
-            metrics["ca_leads"] / metrics["total_leads"] * 100.0,
-            1,
-        )
+            # Calls booked today (from meetings table)
+            if MEETINGS_TABLE is not None and "scheduled_at" in MEETINGS_TABLE.c:
+                stmt = select(func.count()).where(
+                    func.date(MEETINGS_TABLE.c.scheduled_at) == today
+                )
+                result = conn.execute(stmt)
+                stats["calls_booked_today"] = result.scalar() or 0
 
-    return metrics
+                # Total booked calls
+                stmt = select(func.count()).select_from(MEETINGS_TABLE)
+                result = conn.execute(stmt)
+                stats["calls_booked_total"] = result.scalar() or 0
+
+            # Outreach sent today
+            if OUTREACH_TABLE is not None and "created_at" in OUTREACH_TABLE.c:
+                stmt = select(func.count()).where(
+                    func.date(OUTREACH_TABLE.c.created_at) == today
+                )
+                result = conn.execute(stmt)
+                stats["outreach_sent_today"] = result.scalar() or 0
+
+    except Exception as e:
+        print(f"[dashboard] Error getting global stats: {e}")
+
+    return stats
 
 
-ENV_KEYS = [
+def get_pipeline_funnel() -> Dict[str, int]:
+    """Get funnel counts by stage."""
+    funnel = {
+        "raw": 0,
+        "enriched": 0,
+        "qualified": 0,
+        "contacted": 0,
+        "responded": 0,
+        "interested": 0,
+        "call_booked": 0,
+        "converted": 0,
+    }
+
+    if LEADS_TABLE is None or "stage" not in LEADS_TABLE.c:
+        return funnel
+
+    try:
+        with engine.connect() as conn:
+            stmt = select(
+                LEADS_TABLE.c.stage,
+                func.count().label("count")
+            ).group_by(LEADS_TABLE.c.stage)
+
+            results = conn.execute(stmt)
+
+            for row in results:
+                stage = str(row[0]).lower() if row[0] else "unknown"
+                count = row[1] or 0
+
+                # Map stages to funnel steps
+                if stage in funnel:
+                    funnel[stage] = count
+                elif "raw" in stage or "new" in stage:
+                    funnel["raw"] += count
+                elif "enriched" in stage:
+                    funnel["enriched"] += count
+                elif "qualified" in stage:
+                    funnel["qualified"] += count
+                elif "contacted" in stage:
+                    funnel["contacted"] += count
+                elif "responded" in stage or "replied" in stage:
+                    funnel["responded"] += count
+                elif "interested" in stage:
+                    funnel["interested"] += count
+                elif "booked" in stage or "call" in stage:
+                    funnel["call_booked"] += count
+                elif "converted" in stage or "closed" in stage:
+                    funnel["converted"] += count
+
+    except Exception as e:
+        print(f"[dashboard] Error getting pipeline funnel: {e}")
+
+    return funnel
+
+
+def get_channel_breakdown() -> List[Dict[str, Any]]:
+    """Get lead count by platform/channel."""
+    channels = []
+
+    if LEADS_TABLE is None:
+        return channels
+
+    platform_col = None
+    for col_name in ["source_platform", "platform", "source", "channel"]:
+        if col_name in LEADS_TABLE.c:
+            platform_col = LEADS_TABLE.c[col_name]
+            break
+
+    if platform_col is None:
+        return channels
+
+    try:
+        with engine.connect() as conn:
+            stmt = select(
+                platform_col,
+                func.count().label("total"),
+                func.sum(func.case((LEADS_TABLE.c.is_ca_priority == True, 1), else_=0)).label("ca_count")
+                if "is_ca_priority" in LEADS_TABLE.c else func.count().label("ca_count")
+            ).group_by(platform_col)
+
+            results = conn.execute(stmt)
+
+            for row in results:
+                platform = row[0] or "unknown"
+                total = row[1] or 0
+                ca_count = row[2] or 0
+
+                channels.append({
+                    "platform": str(platform),
+                    "count": total,
+                    "ca_count": ca_count,
+                    "non_ca_count": total - ca_count
+                })
+
+            # Sort by count descending
+            channels.sort(key=lambda x: x["count"], reverse=True)
+
+    except Exception as e:
+        print(f"[dashboard] Error getting channel breakdown: {e}")
+
+    return channels
+
+
+def get_time_series(days: int = 30) -> Dict[str, List]:
+    """Get time series data for charts."""
+    series = {
+        "dates": [],
+        "new_leads": [],
+        "qualified": [],
+        "calls_booked": [],
+    }
+
+    if LEADS_TABLE is None:
+        return series
+
+    try:
+        with engine.connect() as conn:
+            # Get date range
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days)
+
+            # Fill in all dates
+            current_date = start_date
+            while current_date <= end_date:
+                series["dates"].append(current_date.isoformat())
+                current_date += timedelta(days=1)
+
+            # Get new leads per day
+            if "created_at" in LEADS_TABLE.c:
+                stmt = select(
+                    func.date(LEADS_TABLE.c.created_at).label("date"),
+                    func.count().label("count")
+                ).where(
+                    func.date(LEADS_TABLE.c.created_at) >= start_date.isoformat()
+                ).group_by(func.date(LEADS_TABLE.c.created_at))
+
+                results = conn.execute(stmt)
+                daily_counts = {str(row[0]): row[1] for row in results}
+
+                series["new_leads"] = [
+                    daily_counts.get(d, 0) for d in series["dates"]
+                ]
+
+            # TODO: Add qualified and calls_booked series when we have the data
+
+    except Exception as e:
+        print(f"[dashboard] Error getting time series: {e}")
+
+    return series
+
+
+def fetch_leads(
+    status: Optional[str] = None,
+    ca_only: bool = False,
+    page: int = 1,
+    page_size: int = 50
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Fetch leads with filtering and pagination."""
+    leads = []
+    total = 0
+
+    if LEADS_TABLE is None:
+        return leads, total
+
+    try:
+        with engine.connect() as conn:
+            # Build base query
+            conditions = []
+
+            if status:
+                if "stage" in LEADS_TABLE.c:
+                    conditions.append(LEADS_TABLE.c.stage == status)
+
+            if ca_only and "is_ca_priority" in LEADS_TABLE.c:
+                conditions.append(LEADS_TABLE.c.is_ca_priority == True)
+
+            # Count total
+            count_stmt = select(func.count()).select_from(LEADS_TABLE)
+            if conditions:
+                count_stmt = count_stmt.where(and_(*conditions))
+            total = conn.execute(count_stmt).scalar() or 0
+
+            # Get page of results
+            offset = (page - 1) * page_size
+            stmt = select(LEADS_TABLE)
+            if conditions:
+                stmt = stmt.where(and_(*conditions))
+
+            # Order by priority score if available
+            if "priority_score" in LEADS_TABLE.c:
+                stmt = stmt.order_by(LEADS_TABLE.c.priority_score.desc())
+            elif "created_at" in LEADS_TABLE.c:
+                stmt = stmt.order_by(LEADS_TABLE.c.created_at.desc())
+
+            stmt = stmt.limit(page_size).offset(offset)
+
+            rows = conn.execute(stmt).mappings().all()
+
+            for row in rows:
+                lead = dict(row)
+                # Format dates
+                if "created_at" in lead:
+                    lead["created_at_formatted"] = _format_dt(lead["created_at"])
+                if "updated_at" in lead:
+                    lead["updated_at_formatted"] = _format_dt(lead["updated_at"])
+
+                leads.append(lead)
+
+    except Exception as e:
+        print(f"[dashboard] Error fetching leads: {e}")
+
+    return leads, total
+
+
+def get_recent_logs(lines: int = 200) -> List[str]:
+    """Get recent log lines."""
+    log_lines = []
+
+    if not LOG_PATH.exists():
+        return log_lines
+
+    try:
+        with open(LOG_PATH, 'r') as f:
+            # Read last N lines
+            all_lines = f.readlines()
+            log_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+
+    except Exception as e:
+        print(f"[dashboard] Error reading logs: {e}")
+
+    return log_lines
+
+
+# ==============================================================================
+# ENVIRONMENT / SETTINGS MANAGEMENT
+# ==============================================================================
+
+EDITABLE_ENV_KEYS = [
     "ANTHROPIC_API_KEY",
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET",
@@ -218,645 +440,351 @@ ENV_KEYS = [
     "REDDIT_USER_AGENT",
     "LINKEDIN_ACCESS_TOKEN",
     "QUICKSCRAPER_API_KEY",
-    "TIMEZONE",
+    "QUICKSCRAPER_BASE_URL",
     "DAILY_CALL_TARGET",
     "MAX_DAILY_OUTREACH",
+    "TIMEZONE",
 ]
 
 
-def load_env() -> Tuple[Dict[str, str], list]:
-    """
-    Load known keys from .env and keep the rest of the file so we can
-    preserve comments and unknown settings.
-    """
-    values: Dict[str, str] = {key: "" for key in ENV_KEYS}
-    other_lines: list = []
-
+def load_env_config() -> Dict[str, str]:
+    """Load editable environment configuration."""
     if not ENV_PATH.exists():
-        return values, other_lines
+        return {key: "" for key in EDITABLE_ENV_KEYS}
 
-    with ENV_PATH.open("r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.rstrip("\n")
-            if not line or line.lstrip().startswith("#"):
-                other_lines.append(line)
-                continue
-            if "=" not in line:
-                other_lines.append(line)
-                continue
-            key, val = line.split("=", 1)
-            key = key.strip()
-            if key in values:
-                values[key] = val
-            else:
-                other_lines.append(line)
-
-    return values, other_lines
+    try:
+        values = dotenv_values(ENV_PATH)
+        return {key: values.get(key, "") for key in EDITABLE_ENV_KEYS}
+    except Exception as e:
+        print(f"[dashboard] Error loading .env: {e}")
+        return {key: "" for key in EDITABLE_ENV_KEYS}
 
 
-def save_env(new_values: Dict[str, str], other_lines: list) -> None:
-    """
-    Rewrite .env with updated known keys and preserved other lines.
-    """
-    lines: list = []
-    lines.append("# LeadFactory configuration (managed by dashboard)")
-    for key in ENV_KEYS:
-        value = new_values.get(key, "")
-        lines.append(f"{key}={value}")
+def save_env_config(updates: Dict[str, str]) -> bool:
+    """Save environment configuration."""
+    if not ENV_PATH.exists():
+        ENV_PATH.touch()
 
-    if other_lines:
-        lines.append("")
-        lines.append("# Other settings")
-        lines.extend(other_lines)
-
-    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        for key, value in updates.items():
+            if key in EDITABLE_ENV_KEYS:
+                set_key(ENV_PATH, key, value)
+        return True
+    except Exception as e:
+        print(f"[dashboard] Error saving .env: {e}")
+        return False
 
 
-BASE_CSS = """
-body {
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    margin: 0;
-    padding: 0;
-    background-color: #0f172a;
-    color: #e5e7eb;
-}
-a {
-    color: #38bdf8;
-    text-decoration: none;
-}
-a:hover {
-    text-decoration: underline;
-}
-nav {
-    background-color: #020617;
-    padding: 0.75rem 1.5rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid #1f2937;
-}
-nav .brand {
-    font-weight: 600;
-    font-size: 1.1rem;
-}
-nav .links a {
-    margin-left: 1rem;
-    font-size: 0.95rem;
-}
-.container {
-    padding: 1.5rem;
-}
-.grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 1rem;
-}
-.card {
-    background-color: #020617;
-    border-radius: 0.75rem;
-    padding: 1rem 1.1rem;
-    border: 1px solid #1f2937;
-}
-.card h2 {
-    margin: 0 0 0.25rem 0;
-    font-size: 0.95rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #9ca3af;
-}
-.card .value {
-    font-size: 1.6rem;
-    font-weight: 600;
-}
-.card .sub {
-    font-size: 0.8rem;
-    color: #9ca3af;
-}
-.badge {
-    display: inline-block;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-}
-.badge-success {
-    background-color: #05966933;
-    color: #6ee7b7;
-}
-.badge-warning {
-    background-color: #f59e0b33;
-    color: #fbbf24;
-}
-.badge-muted {
-    background-color: #4b556333;
-    color: #9ca3af;
-}
-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-}
-th, td {
-    padding: 0.45rem 0.4rem;
-    border-bottom: 1px solid #1f2937;
-}
-th {
-    text-align: left;
-    font-weight: 600;
-    color: #9ca3af;
-    font-size: 0.8rem;
-}
-tr:hover td {
-    background-color: #020617;
-}
-tr.ca-priority td {
-    background-color: #022c22;
-}
-.flash {
-    padding: 0.75rem 1rem;
-    margin-bottom: 1rem;
-    border-radius: 0.5rem;
-    font-size: 0.85rem;
-}
-.flash-success {
-    background-color: #065f46;
-    color: #d1fae5;
-}
-.flash-error {
-    background-color: #7f1d1d;
-    color: #fecaca;
-}
-.form-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 1rem;
-}
-.form-field label {
-    display: block;
-    font-size: 0.8rem;
-    color: #9ca3af;
-    margin-bottom: 0.25rem;
-}
-.form-field input {
-    width: 100%;
-    padding: 0.45rem 0.5rem;
-    border-radius: 0.5rem;
-    border: 1px solid #374151;
-    background-color: #020617;
-    color: #e5e7eb;
-    font-size: 0.85rem;
-}
-button {
-    border-radius: 0.5rem;
-    border: none;
-    cursor: pointer;
-    padding: 0.45rem 0.85rem;
-    font-size: 0.85rem;
-}
-.btn-primary {
-    background-color: #0ea5e9;
-    color: #0f172a;
-}
-.btn-secondary {
-    background-color: #111827;
-    color: #e5e7eb;
-    border: 1px solid #374151;
-}
-.badge-ca {
-    background-color: #4ade8033;
-    color: #bbf7d0;
-}
-.badge-nonca {
-    background-color: #47556933;
-    color: #cbd5f5;
-}
-.small {
-    font-size: 0.78rem;
-    color: #9ca3af;
-}
-"""
+# ==============================================================================
+# PAGE ROUTES
+# ==============================================================================
 
+@app.route('/')
+@app.route('/dashboard')
+def dashboard():
+    """Home dashboard page."""
+    stats = get_global_stats()
+    funnel = get_pipeline_funnel()
+    channels = get_channel_breakdown()
+    time_series = get_time_series(days=30)
 
-OVERVIEW_TEMPLATE = """
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>LeadFactory Dashboard</title>
-    <style>
-    {{ css }}
-    </style>
-  </head>
-  <body>
-    <nav>
-      <div class="brand">LeadFactory • Visual Dashboard</div>
-      <div class="links">
-        <a href="{{ url_for('overview') }}">Overview</a>
-        <a href="{{ url_for('leads_view') }}">Leads</a>
-        <a href="{{ url_for('settings_view') }}">Settings</a>
-      </div>
-    </nav>
-    <div class="container">
-      <div class="grid">
-        <div class="card">
-          <h2>Total Leads</h2>
-          <div class="value" id="metric-total">{{ metrics.total_leads }}</div>
-          <div class="sub">All leads in database</div>
-        </div>
-        <div class="card">
-          <h2>CA Priority Leads</h2>
-          <div class="value" id="metric-ca">{{ metrics.ca_leads }}</div>
-          <div class="sub">Californian (priority) leads</div>
-        </div>
-        <div class="card">
-          <h2>Non-CA Leads</h2>
-          <div class="value" id="metric-nonca">{{ metrics.non_ca_leads }}</div>
-          <div class="sub">All other valid leads (included, not excluded)</div>
-        </div>
-        <div class="card">
-          <h2>CA Share</h2>
-          <div class="value" id="metric-ca-share">{{ metrics.ca_share_pct }}%</div>
-          <div class="sub">CA priority share of total</div>
-        </div>
-        <div class="card">
-          <h2>New Leads Today</h2>
-          <div class="value" id="metric-today">{{ metrics.today_leads }}</div>
-          <div class="sub">Leads created today (local time)</div>
-        </div>
-        <div class="card">
-          <h2>Avg Priority Score</h2>
-          <div class="value" id="metric-avg">{{ metrics.avg_priority_score }}</div>
-          <div class="sub">Score after CA boost where applicable</div>
-        </div>
-      </div>
-
-      <h2 style="margin-top: 2rem; font-size: 1rem;">Recent Leads (sorted by priority)</h2>
-      <p class="small">
-        Californians are highlighted and boosted, but all leads are kept and shown.
-      </p>
-      <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Lead</th>
-              <th>Email</th>
-              <th>Source</th>
-              <th>Stage</th>
-              <th>Location</th>
-              <th>Score</th>
-              <th>Priority</th>
-              <th>CA?</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody id="recent-leads-body">
-          {% for lead in leads %}
-            <tr class="{{ 'ca-priority' if lead.__is_ca_priority else '' }}">
-              <td>{{ lead.get('id', '') }}</td>
-              <td>{{ lead.__display_name }}</td>
-              <td>{{ lead.__display_email }}</td>
-              <td>{{ lead.__display_source }}</td>
-              <td>{{ lead.__display_stage }}</td>
-              <td>{{ lead.__location }}</td>
-              <td>{{ "%.2f"|format(lead.__base_score) }}</td>
-              <td>{{ "%.2f"|format(lead.__priority_score) }}</td>
-              <td>
-                {% if lead.__is_ca_priority %}
-                  <span class="badge badge-ca">CA PRIORITY</span>
-                {% else %}
-                  <span class="badge badge-muted">General</span>
-                {% endif %}
-              </td>
-              <td>{{ lead.__display_created_at }}</td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <script>
-    async function refreshMetrics() {
-      try {
-        const res = await fetch("{{ url_for('api_metrics') }}");
-        if (!res.ok) return;
-        const data = await res.json();
-        const t = document.getElementById("metric-total");
-        const ca = document.getElementById("metric-ca");
-        const nonca = document.getElementById("metric-nonca");
-        const share = document.getElementById("metric-ca-share");
-        const today = document.getElementById("metric-today");
-        const avg = document.getElementById("metric-avg");
-        if (t) t.textContent = data.total_leads ?? 0;
-        if (ca) ca.textContent = data.ca_leads ?? 0;
-        if (nonca) nonca.textContent = data.non_ca_leads ?? 0;
-        if (share) share.textContent = (data.ca_share_pct ?? 0).toFixed(1) + "%";
-        if (today) today.textContent = data.today_leads ?? 0;
-        if (avg) avg.textContent = (data.avg_priority_score ?? 0).toFixed(2);
-      } catch (err) {
-        console.warn("Failed to refresh metrics:", err);
-      }
-    }
-
-    async function refreshRecentLeads() {
-      try {
-        const res = await fetch("{{ url_for('api_leads') }}?limit=30");
-        if (!res.ok) return;
-        const data = await res.json();
-        const body = document.getElementById("recent-leads-body");
-        if (!body) return;
-        body.innerHTML = "";
-        for (const lead of data) {
-          const tr = document.createElement("tr");
-          if (lead.is_ca_priority) {
-            tr.classList.add("ca-priority");
-          }
-          tr.innerHTML = `
-            <td>${lead.id ?? ""}</td>
-            <td>${lead.name ?? ""}</td>
-            <td>${lead.email ?? ""}</td>
-            <td>${lead.source ?? ""}</td>
-            <td>${lead.status ?? ""}</td>
-            <td>${lead.location ?? ""}</td>
-            <td>${(lead.score ?? 0).toFixed(2)}</td>
-            <td>${(lead.priority_score ?? 0).toFixed(2)}</td>
-            <td>${
-              lead.is_ca_priority
-                ? '<span class="badge badge-ca">CA PRIORITY</span>'
-                : '<span class="badge badge-muted">General</span>'
-            }</td>
-            <td>${lead.created_at ?? ""}</td>
-          `;
-          body.appendChild(tr);
-        }
-      } catch (err) {
-        console.warn("Failed to refresh leads:", err);
-      }
-    }
-
-    function startAutoRefresh() {
-      refreshMetrics();
-      refreshRecentLeads();
-      setInterval(refreshMetrics, 5000);
-      setInterval(refreshRecentLeads, 7000);
-    }
-
-    window.addEventListener("load", startAutoRefresh);
-    </script>
-  </body>
-</html>
-"""
-
-
-LEADS_TEMPLATE = """
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>LeadFactory • Leads</title>
-    <style>
-    {{ css }}
-    </style>
-  </head>
-  <body>
-    <nav>
-      <div class="brand">LeadFactory • Leads</div>
-      <div class="links">
-        <a href="{{ url_for('overview') }}">Overview</a>
-        <a href="{{ url_for('leads_view') }}">Leads</a>
-        <a href="{{ url_for('settings_view') }}">Settings</a>
-      </div>
-    </nav>
-    <div class="container">
-      <h1 style="font-size: 1rem; margin-bottom: 0.25rem;">All Leads (sorted by priority)</h1>
-      <p class="small">
-        Californians are given a scoring boost and highlighted in green, but non-CA leads
-        are still fully visible and available for outreach.
-      </p>
-      <div class="card" style="overflow-x: auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Lead</th>
-              <th>Email</th>
-              <th>Source</th>
-              <th>Stage</th>
-              <th>Location</th>
-              <th>Score</th>
-              <th>Priority Score</th>
-              <th>CA?</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-          {% for lead in leads %}
-            <tr class="{{ 'ca-priority' if lead.__is_ca_priority else '' }}">
-              <td>{{ lead.get('id', '') }}</td>
-              <td>{{ lead.__display_name }}</td>
-              <td>{{ lead.__display_email }}</td>
-              <td>{{ lead.__display_source }}</td>
-              <td>{{ lead.__display_stage }}</td>
-              <td>{{ lead.__location }}</td>
-              <td>{{ "%.2f"|format(lead.__base_score) }}</td>
-              <td>{{ "%.2f"|format(lead.__priority_score) }}</td>
-              <td>
-                {% if lead.__is_ca_priority %}
-                  <span class="badge badge-ca">CA PRIORITY</span>
-                {% else %}
-                  <span class="badge badge-nonca">General</span>
-                {% endif %}
-              </td>
-              <td>{{ lead.__display_created_at }}</td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </body>
-</html>
-"""
-
-
-SETTINGS_TEMPLATE = """
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>LeadFactory • Settings</title>
-    <style>
-    {{ css }}
-    </style>
-  </head>
-  <body>
-    <nav>
-      <div class="brand">LeadFactory • Settings</div>
-      <div class="links">
-        <a href="{{ url_for('overview') }}">Overview</a>
-        <a href="{{ url_for('leads_view') }}">Leads</a>
-        <a href="{{ url_for('settings_view') }}">Settings</a>
-      </div>
-    </nav>
-    <div class="container">
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          {% for category, msg in messages %}
-            <div class="flash flash-{{ 'success' if category == 'success' else 'error' }}">{{ msg }}</div>
-          {% endfor %}
-        {% endif %}
-      {% endwith %}
-
-      <h1 style="font-size: 1rem; margin-bottom: 0.25rem;">Configuration</h1>
-      <p class="small">
-        Edit API keys and system settings. Changes are written to <code>.env</code>.
-        You should restart <code>main.py</code> (or the launcher) after saving.
-      </p>
-
-      <form method="post">
-        <div class="form-grid">
-          <div class="form-field">
-            <label for="ANTHROPIC_API_KEY">Anthropic Claude API key</label>
-            <input id="ANTHROPIC_API_KEY" name="ANTHROPIC_API_KEY" type="password"
-                   value="{{ env.ANTHROPIC_API_KEY }}">
-          </div>
-          <div class="form-field">
-            <label for="GOOGLE_CLIENT_ID">Google Client ID</label>
-            <input id="GOOGLE_CLIENT_ID" name="GOOGLE_CLIENT_ID" type="text"
-                   value="{{ env.GOOGLE_CLIENT_ID }}">
-          </div>
-          <div class="form-field">
-            <label for="GOOGLE_CLIENT_SECRET">Google Client Secret</label>
-            <input id="GOOGLE_CLIENT_SECRET" name="GOOGLE_CLIENT_SECRET" type="password"
-                   value="{{ env.GOOGLE_CLIENT_SECRET }}">
-          </div>
-          <div class="form-field">
-            <label for="GOOGLE_REFRESH_TOKEN">Google Refresh Token</label>
-            <input id="GOOGLE_REFRESH_TOKEN" name="GOOGLE_REFRESH_TOKEN" type="password"
-                   value="{{ env.GOOGLE_REFRESH_TOKEN }}">
-          </div>
-          <div class="form-field">
-            <label for="REDDIT_CLIENT_ID">Reddit Client ID</label>
-            <input id="REDDIT_CLIENT_ID" name="REDDIT_CLIENT_ID" type="text"
-                   value="{{ env.REDDIT_CLIENT_ID }}">
-          </div>
-          <div class="form-field">
-            <label for="REDDIT_CLIENT_SECRET">Reddit Client Secret</label>
-            <input id="REDDIT_CLIENT_SECRET" name="REDDIT_CLIENT_SECRET" type="password"
-                   value="{{ env.REDDIT_CLIENT_SECRET }}">
-          </div>
-          <div class="form-field">
-            <label for="REDDIT_USER_AGENT">Reddit User Agent</label>
-            <input id="REDDIT_USER_AGENT" name="REDDIT_USER_AGENT" type="text"
-                   value="{{ env.REDDIT_USER_AGENT }}">
-          </div>
-          <div class="form-field">
-            <label for="LINKEDIN_ACCESS_TOKEN">LinkedIn Access Token</label>
-            <input id="LINKEDIN_ACCESS_TOKEN" name="LINKEDIN_ACCESS_TOKEN" type="password"
-                   value="{{ env.LINKEDIN_ACCESS_TOKEN }}">
-          </div>
-          <div class="form-field">
-            <label for="QUICKSCRAPER_API_KEY">QuickScraper API Key</label>
-            <input id="QUICKSCRAPER_API_KEY" name="QUICKSCRAPER_API_KEY" type="password"
-                   value="{{ env.QUICKSCRAPER_API_KEY }}">
-          </div>
-          <div class="form-field">
-            <label for="TIMEZONE">Timezone</label>
-            <input id="TIMEZONE" name="TIMEZONE" type="text"
-                   value="{{ env.TIMEZONE }}">
-          </div>
-          <div class="form-field">
-            <label for="DAILY_CALL_TARGET">Daily Call Target</label>
-            <input id="DAILY_CALL_TARGET" name="DAILY_CALL_TARGET" type="number" step="1"
-                   value="{{ env.DAILY_CALL_TARGET }}">
-          </div>
-          <div class="form-field">
-            <label for="MAX_DAILY_OUTREACH">Max Daily Outreach</label>
-            <input id="MAX_DAILY_OUTREACH" name="MAX_DAILY_OUTREACH" type="number" step="1"
-                   value="{{ env.MAX_DAILY_OUTREACH }}">
-          </div>
-        </div>
-        <div style="margin-top: 1rem;">
-          <button type="submit" class="btn-primary">Save Settings</button>
-          <a href="{{ url_for('overview') }}" class="btn-secondary" style="margin-left: 0.5rem;">Cancel</a>
-        </div>
-      </form>
-    </div>
-  </body>
-</html>
-"""
-
-
-@app.route("/")
-def overview():
-    metrics = compute_metrics()
-    leads = fetch_recent_leads(limit=15)
-    return render_template_string(
-        OVERVIEW_TEMPLATE,
-        css=BASE_CSS,
-        metrics=metrics,
-        leads=leads,
+    return render_template(
+        'dashboard.html',
+        stats=stats,
+        funnel=funnel,
+        channels=channels,
+        time_series=time_series,
+        page='dashboard'
     )
 
 
-@app.route("/leads")
-def leads_view():
-    leads = fetch_recent_leads(limit=300)
-    return render_template_string(
-        LEADS_TEMPLATE,
-        css=BASE_CSS,
-        leads=leads,
+@app.route('/pipeline')
+def pipeline():
+    """Pipeline and reports page."""
+    stats = get_global_stats()
+    funnel = get_pipeline_funnel()
+    channels = get_channel_breakdown()
+
+    return render_template(
+        'pipeline.html',
+        stats=stats,
+        funnel=funnel,
+        channels=channels,
+        page='pipeline'
     )
 
 
-@app.route("/settings", methods=["GET", "POST"])
-def settings_view():
-    env_values, other_lines = load_env()
-    if request.method == "POST":
-        new_values: Dict[str, str] = {}
-        for key in ENV_KEYS:
-            new_values[key] = request.form.get(key, "").strip()
-        save_env(new_values, other_lines)
-        flash("Settings saved. Restart the main process or launcher to apply changes.", "success")
-        return redirect(url_for("settings_view"))
+@app.route('/leads')
+def leads():
+    """Leads CRM table page."""
+    status = request.args.get('status')
+    ca_only = request.args.get('ca_only', 'false').lower() == 'true'
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('page_size', 50))
 
-    return render_template_string(
-        SETTINGS_TEMPLATE,
-        css=BASE_CSS,
-        env=env_values,
+    lead_list, total = fetch_leads(status, ca_only, page, page_size)
+    stats = get_global_stats()
+
+    total_pages = (total + page_size - 1) // page_size
+
+    return render_template(
+        'leads.html',
+        leads=lead_list,
+        stats=stats,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        status_filter=status,
+        ca_only=ca_only,
+        current_page='leads'
     )
 
 
-@app.route("/api/metrics")
-def api_metrics():
-    return jsonify(compute_metrics())
+@app.route('/outreach')
+def outreach():
+    """Outreach and bookings page."""
+    stats = get_global_stats()
+
+    # Get recent meetings
+    meetings = []
+    if MEETINGS_TABLE is not None:
+        try:
+            with engine.connect() as conn:
+                stmt = select(MEETINGS_TABLE).order_by(
+                    MEETINGS_TABLE.c.scheduled_at.desc()
+                ).limit(20)
+                rows = conn.execute(stmt).mappings().all()
+                meetings = [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[dashboard] Error fetching meetings: {e}")
+
+    return render_template(
+        'outreach.html',
+        stats=stats,
+        meetings=meetings,
+        page='outreach'
+    )
 
 
-@app.route("/api/leads")
+@app.route('/agents')
+def agents():
+    """Agents and health monitoring page."""
+    # Mock agent data - in production this would come from database
+    agent_list = [
+        {"name": "OrchestratorAgent", "last_run": "2 hours ago", "status": "success", "runs_today": 12},
+        {"name": "LeadExtractionAgent", "last_run": "1 hour ago", "status": "success", "runs_today": 24},
+        {"name": "LeadScoringAgent", "last_run": "30 minutes ago", "status": "success", "runs_today": 48},
+        {"name": "OutreachSequencerAgent", "last_run": "15 minutes ago", "status": "success", "runs_today": 6},
+        {"name": "ReplyTriageAgent", "last_run": "5 minutes ago", "status": "success", "runs_today": 3},
+    ]
+
+    return render_template(
+        'agents.html',
+        agents=agent_list,
+        page='agents'
+    )
+
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    """Settings and credentials page."""
+    if request.method == 'POST':
+        # Save settings
+        updates = {}
+        for key in EDITABLE_ENV_KEYS:
+            value = request.form.get(key, '').strip()
+            updates[key] = value
+
+        if save_env_config(updates):
+            flash('Settings saved successfully! Restart the system to apply changes.', 'success')
+        else:
+            flash('Error saving settings.', 'danger')
+
+        return redirect(url_for('settings'))
+
+    config = load_env_config()
+
+    return render_template(
+        'settings.html',
+        config=config,
+        page='settings'
+    )
+
+
+@app.route('/logs')
+def logs():
+    """Logs and debug page."""
+    lines = int(request.args.get('lines', 200))
+    log_lines = get_recent_logs(lines)
+
+    return render_template(
+        'logs.html',
+        log_lines=log_lines,
+        page='logs'
+    )
+
+
+# ==============================================================================
+# API ENDPOINTS
+# ==============================================================================
+
+@app.route('/api/progress')
+def api_progress():
+    """Real-time progress metrics."""
+    stats = get_global_stats()
+    funnel = get_pipeline_funnel()
+    channels = get_channel_breakdown()
+
+    return jsonify({
+        **stats,
+        "funnel": funnel,
+        "channels": channels,
+    })
+
+
+@app.route('/api/leads')
 def api_leads():
-    limit = request.args.get("limit", default=50, type=int)
-    leads = fetch_recent_leads(limit=limit)
-    payload: List[Dict[str, Any]] = []
-    for lead in leads:
-        payload.append(
-            {
-                "id": lead.get("id"),
-                "name": lead.get("__display_name"),
-                "email": lead.get("__display_email"),
-                "source": lead.get("__display_source"),
-                "status": lead.get("__display_stage"),
-                "location": lead.get("__location"),
-                "score": lead.get("__base_score"),
-                "priority_score": lead.get("__priority_score"),
-                "is_ca_priority": lead.get("__is_ca_priority"),
-                "created_at": lead.get("__display_created_at"),
-            }
-        )
-    return jsonify(payload)
+    """Paginated leads list."""
+    status = request.args.get('status')
+    ca_only = request.args.get('ca_only', 'false').lower() == 'true'
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('limit', 50))
 
+    lead_list, total = fetch_leads(status, ca_only, page, page_size)
+
+    return jsonify({
+        "leads": lead_list,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    })
+
+
+@app.route('/api/agents')
+def api_agents():
+    """Agent health status."""
+    # Mock data - replace with actual agent monitoring
+    stats = get_global_stats()
+    funnel = get_pipeline_funnel()
+
+    agent_data = {
+        "Discovery": {"last_run": "Recently", "count": funnel.get("raw", 0)},
+        "Extraction": {"last_run": "Recently", "count": funnel.get("enriched", 0)},
+        "Enrichment": {"last_run": "Recently", "count": funnel.get("enriched", 0)},
+        "Qualification": {"last_run": "Recently", "count": funnel.get("qualified", 0)},
+        "Outreach": {"last_run": "Recently", "count": funnel.get("contacted", 0)},
+        "Persistence": {"last_run": "Recently", "count": stats.get("total_leads", 0)},
+    }
+
+    return jsonify({
+        "status": "Operational",
+        "last_run": "Recently",
+        "total_runs": stats.get("total_leads", 0),
+        "success_rate": 100,
+        "avg_duration": "2-5 minutes",
+        "agents": agent_data,
+        "recent_activity": []
+    })
+
+
+@app.route('/api/logs/tail')
+def api_logs_tail():
+    """Tail of logs with system info."""
+    lines = int(request.args.get('lines', 200))
+    filter_type = request.args.get('filter', 'all')
+
+    log_lines = get_recent_logs(lines)
+
+    # Apply filter
+    if filter_type != 'all':
+        filtered = []
+        for line in log_lines:
+            lower_line = line.lower()
+            if filter_type == 'error' and 'error' in lower_line:
+                filtered.append(line)
+            elif filter_type == 'warning' and 'warning' in lower_line:
+                filtered.append(line)
+            elif filter_type == 'info' and 'info' in lower_line:
+                filtered.append(line)
+            elif filter_type in lower_line:
+                filtered.append(line)
+        log_lines = filtered
+
+    # Get system info
+    stats = get_global_stats()
+    db_size = "Unknown"
+    log_size = "Unknown"
+
+    try:
+        if DB_PATH.exists():
+            db_size_bytes = DB_PATH.stat().st_size
+            db_size = f"{db_size_bytes / 1024 / 1024:.2f} MB"
+    except Exception:
+        pass
+
+    try:
+        if LOG_PATH.exists():
+            log_size_bytes = LOG_PATH.stat().st_size
+            log_size = f"{log_size_bytes / 1024:.2f} KB"
+    except Exception:
+        pass
+
+    system_info = {
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "db_size": db_size,
+        "log_size": log_size,
+        "total_records": stats.get("total_leads", 0),
+        "disk_usage": "N/A"
+    }
+
+    return jsonify({
+        "logs": log_lines,
+        "system_info": system_info
+    })
+
+
+@app.route('/api/logs/download')
+def api_logs_download():
+    """Download full log file."""
+    if not LOG_PATH.exists():
+        return "Log file not found", 404
+
+    try:
+        return send_file(
+            LOG_PATH,
+            as_attachment=True,
+            download_name="leadfactory.log",
+            mimetype="text/plain"
+        )
+    except Exception as e:
+        return f"Error downloading logs: {e}", 500
+
+
+# ==============================================================================
+# ACTION ENDPOINTS
+# ==============================================================================
+
+@app.route('/actions/run_once', methods=['POST'])
+def action_run_once():
+    """Trigger one orchestrator cycle."""
+    try:
+        # Run main.py --run-once
+        subprocess.Popen([sys.executable, "main.py", "--run-once"], cwd=BASE_DIR)
+        return jsonify({"success": True, "message": "Pipeline started"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ==============================================================================
+# RUN SERVER
+# ==============================================================================
 
 if __name__ == "__main__":
-    # Default to localhost:5000 as per README
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    port = int(os.environ.get("FLASK_PORT", "5000"))
+    debug = os.environ.get("FLASK_DEBUG", "true").lower() == "true"
+
+    print(f"[dashboard] Starting LeadFactory Control Center on port {port}")
+    print(f"[dashboard] Visit: http://127.0.0.1:{port}")
+
+    app.run(host="127.0.0.1", port=port, debug=debug)

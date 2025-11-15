@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline - LeadFactory{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-4">Pipeline Analysis</h1>
+
+<!-- Pipeline Funnel -->
+<div class="stats-card mb-4">
+    <h5 class="mb-3"><i class="bi bi-funnel"></i> Lead Funnel</h5>
+    <div class="row">
+        <div class="col-md-8">
+            <canvas id="funnelChart"></canvas>
+        </div>
+        <div class="col-md-4">
+            <h6 class="text-muted">Conversion Rates</h6>
+            <ul class="list-unstyled">
+                <li class="mb-2">
+                    <small class="text-muted">Raw → Enriched:</small>
+                    <strong id="conv-enriched">--%</strong>
+                </li>
+                <li class="mb-2">
+                    <small class="text-muted">Enriched → Qualified:</small>
+                    <strong id="conv-qualified">--%</strong>
+                </li>
+                <li class="mb-2">
+                    <small class="text-muted">Qualified → Contacted:</small>
+                    <strong id="conv-contacted">--%</strong>
+                </li>
+                <li class="mb-2">
+                    <small class="text-muted">Contacted → Responded:</small>
+                    <strong id="conv-responded">--%</strong>
+                </li>
+                <li class="mb-2">
+                    <small class="text-muted">Responded → Booked:</small>
+                    <strong id="conv-booked">--%</strong>
+                </li>
+                <li class="mb-2">
+                    <small class="text-muted">Booked → Converted:</small>
+                    <strong id="conv-converted">--%</strong>
+                </li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- Stage Breakdown -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="stats-card">
+            <h5 class="mb-3"><i class="bi bi-pie-chart"></i> CA Priority by Stage</h5>
+            <canvas id="caByStageChart"></canvas>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="stats-card">
+            <h5 class="mb-3"><i class="bi bi-bar-chart"></i> Channel Performance</h5>
+            <canvas id="channelChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Stage Details Table -->
+<div class="stats-card">
+    <h5 class="mb-3"><i class="bi bi-table"></i> Stage Details</h5>
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead>
+                <tr>
+                    <th>Stage</th>
+                    <th>Total</th>
+                    <th>CA Priority</th>
+                    <th>Non-CA</th>
+                    <th>CA Share %</th>
+                    <th>Avg Priority Score</th>
+                </tr>
+            </thead>
+            <tbody id="stage-table-body">
+                <tr>
+                    <td colspan="6" class="text-center text-muted">Loading...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let funnelChart, caByStageChart, channelChart;
+
+function loadPipelineData() {
+    fetch('/api/progress')
+        .then(response => response.json())
+        .then(data => {
+            // Update conversion rates
+            const funnel = data.funnel || {};
+            const calcConv = (a, b) => b > 0 ? ((a/b) * 100).toFixed(1) : '0.0';
+
+            document.getElementById('conv-enriched').textContent = calcConv(funnel.enriched, funnel.raw) + '%';
+            document.getElementById('conv-qualified').textContent = calcConv(funnel.qualified, funnel.enriched) + '%';
+            document.getElementById('conv-contacted').textContent = calcConv(funnel.contacted, funnel.qualified) + '%';
+            document.getElementById('conv-responded').textContent = calcConv(funnel.responded, funnel.contacted) + '%';
+            document.getElementById('conv-booked').textContent = calcConv(funnel.call_booked, funnel.responded) + '%';
+            document.getElementById('conv-converted').textContent = calcConv(funnel.converted, funnel.call_booked) + '%';
+
+            // Update funnel chart
+            if (funnelChart) {
+                funnelChart.data.datasets[0].data = [
+                    funnel.raw || 0,
+                    funnel.enriched || 0,
+                    funnel.qualified || 0,
+                    funnel.contacted || 0,
+                    funnel.responded || 0,
+                    funnel.call_booked || 0,
+                    funnel.converted || 0
+                ];
+                funnelChart.update();
+            }
+
+            // Update CA by stage chart
+            if (caByStageChart && data.ca_priority_leads !== undefined) {
+                caByStageChart.data.datasets[0].data = [
+                    data.ca_priority_leads || 0,
+                    data.non_ca_leads || 0
+                ];
+                caByStageChart.update();
+            }
+
+            // Update channel chart
+            if (channelChart && data.channels) {
+                const channels = data.channels.slice(0, 5);
+                channelChart.data.labels = channels.map(c => c.platform);
+                channelChart.data.datasets[0].data = channels.map(c => c.ca_count || 0);
+                channelChart.data.datasets[1].data = channels.map(c => c.non_ca_count || 0);
+                channelChart.update();
+            }
+
+            // Update stage details table
+            updateStageTable(data);
+        })
+        .catch(err => console.error('Error loading pipeline data:', err));
+}
+
+function updateStageTable(data) {
+    const stages = [
+        { name: 'Raw', key: 'raw' },
+        { name: 'Enriched', key: 'enriched' },
+        { name: 'Qualified', key: 'qualified' },
+        { name: 'Contacted', key: 'contacted' },
+        { name: 'Responded', key: 'responded' },
+        { name: 'Call Booked', key: 'call_booked' },
+        { name: 'Converted', key: 'converted' }
+    ];
+
+    const tbody = document.getElementById('stage-table-body');
+    tbody.innerHTML = '';
+
+    stages.forEach(stage => {
+        const total = data.funnel?.[stage.key] || 0;
+        const caCount = Math.floor(total * (data.ca_share_pct || 0) / 100);
+        const nonCaCount = total - caCount;
+        const caShare = total > 0 ? ((caCount / total) * 100).toFixed(1) : '0.0';
+        const avgScore = data.avg_priority_score || 0;
+
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${stage.name}</strong></td>
+            <td>${total}</td>
+            <td><span class="badge bg-success">${caCount}</span></td>
+            <td>${nonCaCount}</td>
+            <td>${caShare}%</td>
+            <td>${avgScore.toFixed(1)}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+// Initialize charts
+document.addEventListener('DOMContentLoaded', function() {
+    // Funnel chart
+    const funnelCtx = document.getElementById('funnelChart').getContext('2d');
+    funnelChart = new Chart(funnelCtx, {
+        type: 'bar',
+        data: {
+            labels: ['Raw', 'Enriched', 'Qualified', 'Contacted', 'Responded', 'Booked', 'Converted'],
+            datasets: [{
+                label: 'Leads',
+                data: [0, 0, 0, 0, 0, 0, 0],
+                backgroundColor: ['#3b82f6', '#22c55e', '#eab308', '#f97316', '#ec4899', '#8b5cf6', '#06b6d4']
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                x: { beginAtZero: true, grid: { color: '#1e293b' } },
+                y: { grid: { display: false } }
+            }
+        }
+    });
+
+    // CA by stage pie chart
+    const caStageCtx = document.getElementById('caByStageChart').getContext('2d');
+    caByStageChart = new Chart(caStageCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['CA Priority', 'Non-CA'],
+            datasets: [{
+                data: [0, 0],
+                backgroundColor: ['#22c55e', '#64748b']
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: { position: 'bottom' }
+            }
+        }
+    });
+
+    // Channel performance chart
+    const channelCtx = document.getElementById('channelChart').getContext('2d');
+    channelChart = new Chart(channelCtx, {
+        type: 'bar',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'CA Priority',
+                    data: [],
+                    backgroundColor: '#22c55e'
+                },
+                {
+                    label: 'Non-CA',
+                    data: [],
+                    backgroundColor: '#64748b'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            scales: {
+                x: { stacked: true, grid: { display: false } },
+                y: { stacked: true, beginAtZero: true, grid: { color: '#1e293b' } }
+            },
+            plugins: {
+                legend: { position: 'bottom' }
+            }
+        }
+    });
+
+    // Load initial data
+    loadPipelineData();
+
+    // Auto-refresh every 7 seconds
+    setInterval(loadPipelineData, 7000);
+});
+</script>
+{% endblock %}

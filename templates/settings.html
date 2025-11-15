@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - LeadFactory{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-4">Settings & Credentials</h1>
+
+<div class="alert alert-info">
+    <i class="bi bi-info-circle"></i>
+    <strong>Important:</strong> After saving changes, restart the system (main.py and dashboard.py) for changes to take effect.
+</div>
+
+<form method="post" action="{{ url_for('settings') }}">
+    <!-- API Keys Section -->
+    <div class="stats-card mb-4">
+        <h5 class="mb-3"><i class="bi bi-key"></i> API Keys</h5>
+        <div class="row g-3">
+            <div class="col-md-6">
+                <label for="ANTHROPIC_API_KEY" class="form-label">
+                    Anthropic Claude API Key
+                    <small class="text-muted">(Required for AI scoring)</small>
+                </label>
+                <div class="input-group">
+                    <input type="password" class="form-control" id="ANTHROPIC_API_KEY"
+                           name="ANTHROPIC_API_KEY" value="{{ config.ANTHROPIC_API_KEY }}">
+                    <button class="btn btn-outline-secondary" type="button"
+                            onclick="togglePassword('ANTHROPIC_API_KEY')">
+                        <i class="bi bi-eye"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <label for="QUICKSCRAPER_API_KEY" class="form-label">
+                    QuickScraper API Key
+                    <small class="text-muted">(For anti-blocking)</small>
+                </label>
+                <div class="input-group">
+                    <input type="password" class="form-control" id="QUICKSCRAPER_API_KEY"
+                           name="QUICKSCRAPER_API_KEY" value="{{ config.QUICKSCRAPER_API_KEY }}">
+                    <button class="btn btn-outline-secondary" type="button"
+                            onclick="togglePassword('QUICKSCRAPER_API_KEY')">
+                        <i class="bi bi-eye"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Google APIs -->
+    <div class="stats-card mb-4">
+        <h5 class="mb-3"><i class="bi bi-google"></i> Google APIs (Optional)</h5>
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label for="GOOGLE_CLIENT_ID" class="form-label">Client ID</label>
+                <input type="text" class="form-control" id="GOOGLE_CLIENT_ID"
+                       name="GOOGLE_CLIENT_ID" value="{{ config.GOOGLE_CLIENT_ID }}">
+            </div>
+            <div class="col-md-4">
+                <label for="GOOGLE_CLIENT_SECRET" class="form-label">Client Secret</label>
+                <input type="password" class="form-control" id="GOOGLE_CLIENT_SECRET"
+                       name="GOOGLE_CLIENT_SECRET" value="{{ config.GOOGLE_CLIENT_SECRET }}">
+            </div>
+            <div class="col-md-4">
+                <label for="GOOGLE_REFRESH_TOKEN" class="form-label">Refresh Token</label>
+                <input type="password" class="form-control" id="GOOGLE_REFRESH_TOKEN"
+                       name="GOOGLE_REFRESH_TOKEN" value="{{ config.GOOGLE_REFRESH_TOKEN }}">
+            </div>
+        </div>
+    </div>
+
+    <!-- Reddit API -->
+    <div class="stats-card mb-4">
+        <h5 class="mb-3"><i class="bi bi-reddit"></i> Reddit API (Optional)</h5>
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label for="REDDIT_CLIENT_ID" class="form-label">Client ID</label>
+                <input type="text" class="form-control" id="REDDIT_CLIENT_ID"
+                       name="REDDIT_CLIENT_ID" value="{{ config.REDDIT_CLIENT_ID }}">
+            </div>
+            <div class="col-md-4">
+                <label for="REDDIT_CLIENT_SECRET" class="form-label">Client Secret</label>
+                <input type="password" class="form-control" id="REDDIT_CLIENT_SECRET"
+                       name="REDDIT_CLIENT_SECRET" value="{{ config.REDDIT_CLIENT_SECRET }}">
+            </div>
+            <div class="col-md-4">
+                <label for="REDDIT_USER_AGENT" class="form-label">User Agent</label>
+                <input type="text" class="form-control" id="REDDIT_USER_AGENT"
+                       name="REDDIT_USER_AGENT" value="{{ config.REDDIT_USER_AGENT }}">
+            </div>
+        </div>
+    </div>
+
+    <!-- LinkedIn & Other APIs -->
+    <div class="stats-card mb-4">
+        <h5 class="mb-3"><i class="bi bi-linkedin"></i> Other APIs (Optional)</h5>
+        <div class="row g-3">
+            <div class="col-md-6">
+                <label for="LINKEDIN_ACCESS_TOKEN" class="form-label">LinkedIn Access Token</label>
+                <input type="password" class="form-control" id="LINKEDIN_ACCESS_TOKEN"
+                       name="LINKEDIN_ACCESS_TOKEN" value="{{ config.LINKEDIN_ACCESS_TOKEN }}">
+            </div>
+            <div class="col-md-6">
+                <label for="QUICKSCRAPER_BASE_URL" class="form-label">QuickScraper Base URL</label>
+                <input type="text" class="form-control" id="QUICKSCRAPER_BASE_URL"
+                       name="QUICKSCRAPER_BASE_URL" value="{{ config.QUICKSCRAPER_BASE_URL }}"
+                       placeholder="https://api.quickscraper.co">
+            </div>
+        </div>
+    </div>
+
+    <!-- System Settings -->
+    <div class="stats-card mb-4">
+        <h5 class="mb-3"><i class="bi bi-sliders"></i> System Settings</h5>
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label for="DAILY_CALL_TARGET" class="form-label">Daily Call Target</label>
+                <input type="number" class="form-control" id="DAILY_CALL_TARGET"
+                       name="DAILY_CALL_TARGET" value="{{ config.DAILY_CALL_TARGET or '4' }}">
+            </div>
+            <div class="col-md-4">
+                <label for="MAX_DAILY_OUTREACH" class="form-label">Max Daily Outreach</label>
+                <input type="number" class="form-control" id="MAX_DAILY_OUTREACH"
+                       name="MAX_DAILY_OUTREACH" value="{{ config.MAX_DAILY_OUTREACH or '40' }}">
+            </div>
+            <div class="col-md-4">
+                <label for="TIMEZONE" class="form-label">Timezone</label>
+                <input type="text" class="form-control" id="TIMEZONE"
+                       name="TIMEZONE" value="{{ config.TIMEZONE or 'America/Los_Angeles' }}">
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Button -->
+    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">Cancel</a>
+        <button type="submit" class="btn btn-primary">
+            <i class="bi bi-save"></i> Save Settings
+        </button>
+    </div>
+</form>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function togglePassword(fieldId) {
+    const field = document.getElementById(fieldId);
+    const icon = event.currentTarget.querySelector('i');
+
+    if (field.type === 'password') {
+        field.type = 'text';
+        icon.classList.remove('bi-eye');
+        icon.classList.add('bi-eye-slash');
+    } else {
+        field.type = 'password';
+        icon.classList.remove('bi-eye-slash');
+        icon.classList.add('bi-eye');
+    }
+}
+</script>
+{% endblock %}

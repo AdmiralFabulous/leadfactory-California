@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+
+{% block title %}Logs & Debug - LeadFactory{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-4">Logs & Debug</h1>
+
+<!-- Log Controls -->
+<div class="stats-card mb-4">
+    <div class="row align-items-center">
+        <div class="col-md-4">
+            <label for="log-filter" class="form-label">Filter</label>
+            <select class="form-select" id="log-filter">
+                <option value="all">All Logs</option>
+                <option value="error">Errors Only</option>
+                <option value="warning">Warnings Only</option>
+                <option value="info">Info Only</option>
+                <option value="discovery">Discovery Agent</option>
+                <option value="extraction">Extraction Agent</option>
+                <option value="enrichment">Enrichment Agent</option>
+                <option value="qualification">Qualification Agent</option>
+                <option value="outreach">Outreach Agent</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label for="log-lines" class="form-label">Lines to Show</label>
+            <select class="form-select" id="log-lines">
+                <option value="50">Last 50</option>
+                <option value="100" selected>Last 100</option>
+                <option value="200">Last 200</option>
+                <option value="500">Last 500</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label d-block">Options</label>
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="auto-refresh" checked>
+                <label class="form-check-label" for="auto-refresh">
+                    Auto-refresh (every 5s)
+                </label>
+            </div>
+            <div class="form-check form-switch mt-2">
+                <input class="form-check-input" type="checkbox" id="auto-scroll" checked>
+                <label class="form-check-label" for="auto-scroll">
+                    Auto-scroll to bottom
+                </label>
+            </div>
+        </div>
+    </div>
+    <div class="row mt-3">
+        <div class="col-md-12">
+            <button class="btn btn-sm btn-primary" onclick="refreshLogs()">
+                <i class="bi bi-arrow-clockwise"></i> Refresh Now
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="clearLogDisplay()">
+                <i class="bi bi-trash"></i> Clear Display
+            </button>
+            <button class="btn btn-sm btn-outline-primary" onclick="downloadLogs()">
+                <i class="bi bi-download"></i> Download Full Log
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Log Viewer -->
+<div class="stats-card">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0"><i class="bi bi-terminal"></i> Log Viewer</h5>
+        <span class="badge bg-secondary" id="log-count">0 lines</span>
+    </div>
+    <div class="log-viewer" id="log-viewer">
+        <pre id="log-content" class="mb-0">Loading logs...</pre>
+    </div>
+</div>
+
+<!-- System Info -->
+<div class="row mt-4">
+    <div class="col-md-6">
+        <div class="stats-card">
+            <h6 class="mb-3"><i class="bi bi-info-circle"></i> System Information</h6>
+            <table class="table table-sm table-borderless">
+                <tbody>
+                    <tr>
+                        <td class="text-muted">Database Path:</td>
+                        <td><code>data/leadfactory.db</code></td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Log Path:</td>
+                        <td><code>data/logs/leadfactory.log</code></td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Python Version:</td>
+                        <td id="python-version">--</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Dashboard Version:</td>
+                        <td>2.0.0</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="stats-card">
+            <h6 class="mb-3"><i class="bi bi-hdd"></i> Storage</h6>
+            <table class="table table-sm table-borderless">
+                <tbody>
+                    <tr>
+                        <td class="text-muted">Database Size:</td>
+                        <td id="db-size">--</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Log Size:</td>
+                        <td id="log-size">--</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Total Records:</td>
+                        <td id="total-records">--</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Disk Usage:</td>
+                        <td id="disk-usage">--</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.log-viewer {
+    background-color: #000;
+    color: #0f0;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    padding: 15px;
+    border-radius: 5px;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.log-viewer pre {
+    color: #0f0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.log-line-error {
+    color: #ff6b6b;
+    font-weight: bold;
+}
+
+.log-line-warning {
+    color: #ffd93d;
+}
+
+.log-line-info {
+    color: #6bcf7f;
+}
+
+.log-line-debug {
+    color: #999;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let autoRefreshInterval = null;
+
+function refreshLogs() {
+    const filter = document.getElementById('log-filter').value;
+    const lines = document.getElementById('log-lines').value;
+
+    fetch(`/api/logs/tail?lines=${lines}&filter=${filter}`)
+        .then(response => response.json())
+        .then(data => {
+            const logContent = document.getElementById('log-content');
+            const logCount = document.getElementById('log-count');
+
+            if (data.logs && data.logs.length > 0) {
+                // Format logs with color coding
+                const formattedLogs = data.logs.map(line => {
+                    if (line.toLowerCase().includes('error')) {
+                        return `<span class="log-line-error">${escapeHtml(line)}</span>`;
+                    } else if (line.toLowerCase().includes('warning')) {
+                        return `<span class="log-line-warning">${escapeHtml(line)}</span>`;
+                    } else if (line.toLowerCase().includes('info')) {
+                        return `<span class="log-line-info">${escapeHtml(line)}</span>`;
+                    } else {
+                        return `<span class="log-line-debug">${escapeHtml(line)}</span>`;
+                    }
+                }).join('\n');
+
+                logContent.innerHTML = formattedLogs || 'No logs found.';
+                logCount.textContent = data.logs.length + ' lines';
+
+                // Auto-scroll to bottom if enabled
+                if (document.getElementById('auto-scroll').checked) {
+                    const logViewer = document.getElementById('log-viewer');
+                    logViewer.scrollTop = logViewer.scrollHeight;
+                }
+            } else {
+                logContent.textContent = 'No logs available. Try running the pipeline first.';
+                logCount.textContent = '0 lines';
+            }
+
+            // Update system info
+            if (data.system_info) {
+                document.getElementById('python-version').textContent = data.system_info.python_version || '--';
+                document.getElementById('db-size').textContent = data.system_info.db_size || '--';
+                document.getElementById('log-size').textContent = data.system_info.log_size || '--';
+                document.getElementById('total-records').textContent = data.system_info.total_records || '--';
+                document.getElementById('disk-usage').textContent = data.system_info.disk_usage || '--';
+            }
+        })
+        .catch(err => {
+            console.error('Error loading logs:', err);
+            document.getElementById('log-content').textContent = 'Error loading logs. Make sure the log file exists at data/logs/leadfactory.log';
+        });
+}
+
+function clearLogDisplay() {
+    document.getElementById('log-content').textContent = 'Display cleared. Click "Refresh Now" to reload logs.';
+    document.getElementById('log-count').textContent = '0 lines';
+}
+
+function downloadLogs() {
+    window.location.href = '/api/logs/download';
+}
+
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+function toggleAutoRefresh() {
+    const autoRefreshEnabled = document.getElementById('auto-refresh').checked;
+
+    if (autoRefreshEnabled) {
+        if (!autoRefreshInterval) {
+            autoRefreshInterval = setInterval(refreshLogs, 5000);
+        }
+    } else {
+        if (autoRefreshInterval) {
+            clearInterval(autoRefreshInterval);
+            autoRefreshInterval = null;
+        }
+    }
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', function() {
+    // Load initial logs
+    refreshLogs();
+
+    // Set up event listeners
+    document.getElementById('log-filter').addEventListener('change', refreshLogs);
+    document.getElementById('log-lines').addEventListener('change', refreshLogs);
+    document.getElementById('auto-refresh').addEventListener('change', toggleAutoRefresh);
+
+    // Start auto-refresh (default is on)
+    toggleAutoRefresh();
+});
+</script>
+{% endblock %}
