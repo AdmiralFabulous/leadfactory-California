@@ -109,6 +109,8 @@ class Lead(Base):
 
     # Scoring & qualification
     score = Column(Float, default=0.0, index=True)
+    priority_score = Column(Float, default=0.0, index=True)  # Score after CA boost
+    is_ca_priority = Column(Boolean, default=False, index=True)  # CA priority flag
     is_qualified = Column(Boolean, default=False, index=True)
     qualification_notes = Column(Text)
     disqualification_reason = Column(Text)
@@ -139,6 +141,8 @@ class Lead(Base):
         Index('idx_qualified_stage', 'is_qualified', 'stage'),
         Index('idx_californian_intent', 'is_californian', 'expressed_leaving_intent'),
         Index('idx_score_stage', 'score', 'stage'),
+        Index('idx_priority_score', 'priority_score'),
+        Index('idx_ca_priority', 'is_ca_priority', 'priority_score'),
     )
 
     def __repr__(self):
@@ -159,6 +163,8 @@ class Lead(Base):
             "city": self.city,
             "state": self.state,
             "score": self.score,
+            "priority_score": self.priority_score,
+            "is_ca_priority": self.is_ca_priority,
             "stage": self.stage.value if self.stage else None,
             "is_qualified": self.is_qualified,
             "source": self.source_platform,

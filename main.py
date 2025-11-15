@@ -30,6 +30,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
+from ca_priority import apply_ca_priority, is_california_location
+
 
 # -------------------------
 # Environment / configuration
@@ -90,6 +92,8 @@ class Lead(Base):
     context = Column(Text, nullable=True)
     intent_summary = Column(Text, nullable=True)
     intent_score = Column(Float, nullable=True)
+    priority_score = Column(Float, nullable=True, index=True)  # Score after CA boost
+    is_ca_priority = Column(Boolean, default=False, index=True)  # CA priority flag
     tags = Column(Text, nullable=True)
     contacted = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -589,24 +593,41 @@ class QualificationAgent:
 
             is_cal = bool(payload.get("is_california"))
             wants_out = bool(payload.get("wants_to_leave_usa"))
-            score = payload.get("suitability_score")
+            base_score = payload.get("suitability_score")
             intent_summary = payload.get("intent_summary")
             tags = payload.get("tags")
 
-            if score is None:
+            if base_score is None:
                 continue
 
-            lead.intent_score = float(score)
+            # Convert 0-1 score to 0-100 scale for consistency
+            base_score_scaled = float(base_score) * 100
+
+            # If clearly not from CA or not wanting to leave USA, downgrade base score
+            if not is_cal or not wants_out:
+                base_score_scaled = base_score_scaled * 0.2
+
+            # Apply CA priority boost to get priority_score
+            priority_score, is_ca_priority = apply_ca_priority(
+                base_score=base_score_scaled,
+                location=lead.location,
+                ca_boost=2.0
+            )
+
+            # Update lead with both scores
+            lead.intent_score = base_score_scaled
+            lead.priority_score = priority_score
+            lead.is_ca_priority = is_ca_priority
+
             if intent_summary:
                 lead.intent_summary = intent_summary
             if tags is not None:
                 lead.tags = json.dumps(tags)
-            # If clearly not from CA or not wanting to leave USA, downgrade score
-            if not is_cal or not wants_out:
-                lead.intent_score = float(score) * 0.2
 
             db.add(lead)
             updated += 1
+            logger.info(f"Lead {lead.id}: base={base_score_scaled:.2f}, priority={priority_score:.2f}, CA={is_ca_priority}")
+
         db.commit()
         logger.info(f"QualificationAgent: updated {updated} leads with scores.")
         return updated
@@ -708,12 +729,12 @@ class EmailOutreachAgent:
         leads = (
             db.query(Lead)
             .filter(
-                Lead.intent_score.isnot(None),
+                Lead.priority_score.isnot(None),
                 Lead.intent_score >= self.min_intent_score,
                 Lead.email.isnot(None),
                 Lead.contacted.is_(False),
             )
-            .order_by(Lead.intent_score.desc(), Lead.created_at.asc())
+            .order_by(Lead.priority_score.desc(), Lead.created_at.asc())  # Sort by priority_score to prioritize CA leads
             .limit(remaining)
             .all()
         )

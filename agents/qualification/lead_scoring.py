@@ -5,6 +5,7 @@ from agents.base_agent import BaseAgent
 from tools.crm_tools import get_leads_by_stage, update_lead_score
 from config.settings import SCORING_WEIGHTS, DISQUALIFICATION_FLAGS
 from database.models import LeadStage
+from ca_priority import apply_ca_priority, is_california_location
 
 
 class LeadScoringAgent(BaseAgent):
@@ -53,37 +54,61 @@ A lead must score >= 60 to qualify for outreach."""
         if not lead:
             return 0
 
-        score = 0
+        base_score = 0
         notes = []
 
-        # Location scoring
+        # Build location string for CA detection
+        location_parts = []
+        if lead.get('city'):
+            location_parts.append(lead.get('city'))
+        if lead.get('state'):
+            location_parts.append(lead.get('state'))
+        location_str = ', '.join(location_parts) if location_parts else None
+
+        # Location scoring (base score still includes CA points)
         if lead.get('state') == 'California':
-            score += SCORING_WEIGHTS['location_california']
+            base_score += SCORING_WEIGHTS['location_california']
             notes.append("+30 California resident")
             update_lead(lead_id, is_californian=True)
 
         # Intent scoring (check original post)
         snippet = lead.get('original_post_snippet', '').lower()
         if any(word in snippet for word in ['leaving', 'moving out', 'escape']):
-            score += SCORING_WEIGHTS['explicit_leaving_intent']
+            base_score += SCORING_WEIGHTS['explicit_leaving_intent']
             notes.append("+25 Clear exit intent")
             update_lead(lead_id, expressed_leaving_intent=True)
 
         # Professional scoring
         job_title = (lead.get('job_title') or '').lower()
         if any(word in job_title for word in ['engineer', 'director', 'vp', 'manager', 'founder']):
-            score += SCORING_WEIGHTS['high_income_proxy']
+            base_score += SCORING_WEIGHTS['high_income_proxy']
             notes.append("+20 Professional role")
             update_lead(lead_id, likely_property_buyer=True)
 
         # Disqualifications
         if any(word in snippet for word in ['student', 'broke', 'no money']):
-            score += DISQUALIFICATION_FLAGS['mentions_broke']
+            base_score += DISQUALIFICATION_FLAGS['mentions_broke']
             notes.append("-25 Financial concerns mentioned")
 
-        # Update score
-        qualification_notes = "\n".join(notes)
-        update_lead_score(lead_id, score, qualification_notes)
+        # Apply CA priority boost to get priority_score
+        priority_score, is_ca = apply_ca_priority(
+            base_score=base_score,
+            location=location_str,
+            ca_boost=2.0
+        )
 
-        self.log(f"Lead {lead_id} scored: {score}")
-        return score
+        if is_ca:
+            notes.append(f"+2.0 CA Priority Boost (priority_score: {priority_score})")
+
+        # Update both base score and priority score
+        qualification_notes = "\n".join(notes)
+        update_lead(
+            lead_id,
+            score=base_score,
+            priority_score=priority_score,
+            is_ca_priority=is_ca,
+            qualification_notes=qualification_notes
+        )
+
+        self.log(f"Lead {lead_id} scored: base={base_score}, priority={priority_score}, CA={is_ca}")
+        return priority_score  # Return priority_score for sorting
