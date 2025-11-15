@@ -251,6 +251,31 @@ DEFAULT_SOURCES = {
             "retire in madeira from california",
         ]
     },
+    "facebook": {
+        "groups": [
+            {
+                "name": "Epic Retire",
+                "url": "https://www.facebook.com/groups/epicretire",
+                "keywords": ["retire", "retirement", "early retirement", "financial independence"]
+            },
+            {
+                "name": "Americans Moving Abroad",
+                "url": "https://www.facebook.com/groups/americansmovingabroad",
+                "keywords": ["moving abroad", "expat", "leaving usa", "emigrate"]
+            },
+            {
+                "name": "California Exodus",
+                "url": "https://www.facebook.com/groups/californiaexodus",
+                "keywords": ["leaving california", "california exodus", "moving out"]
+            },
+            {
+                "name": "Portugal Expats",
+                "url": "https://www.facebook.com/groups/portugalexpats",
+                "keywords": ["portugal", "madeira", "golden visa", "d7 visa"]
+            },
+        ],
+        "note": "Requires facebook-scraper service to be running (cd facebook-scraper && npm start)"
+    },
 }
 
 # Outreach message templates (basic - expanded by OutreachCopyAgent)

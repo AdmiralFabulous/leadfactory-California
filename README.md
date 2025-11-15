@@ -13,7 +13,7 @@
 
 This system uses a **multi-agent architecture** where specialized AI agents collaborate to:
 
-1. **Find leads** across social platforms (Reddit, LinkedIn, forums)
+1. **Find leads** across social platforms (Reddit, Facebook Groups, LinkedIn, forums)
 2. **Enrich & qualify** leads based on location, intent, and capacity
 3. **Personalize outreach** with compelling, compliant messages
 4. **Handle responses** and answer questions
@@ -111,6 +111,54 @@ python main.py --agent LeadExtractionAgent --count 10
 python dashboard.py
 ```
 
+## 📘 Facebook Groups Integration (Optional)
+
+**NEW:** Automatically scrape Facebook groups for high-quality leads!
+
+The system now includes a Node.js-based Facebook scraper that uses Chrome DevTools MCP to automate browser interaction with Facebook groups.
+
+### Quick Setup
+
+```bash
+# 1. Ensure Node.js 22.12.0+ is installed
+node -v
+
+# 2. Install Facebook scraper dependencies
+cd facebook-scraper
+npm install
+
+# 3. Start the Facebook scraper service (keep running)
+npm start
+```
+
+### Automatic Integration
+
+Once the Facebook scraper is running, the LeadExtractionAgent automatically uses it alongside Reddit:
+
+```bash
+python main.py --mode manual --agent extract
+# Will scrape both Reddit AND Facebook groups
+```
+
+### Features
+
+- ✅ **Automated browser control** via Chrome DevTools MCP
+- ✅ **Extracts posts & comments** from Facebook groups
+- ✅ **Real-time progress** via WebSocket
+- ✅ **Seamless Python integration** - works like any other source
+- ✅ **Pre-configured groups**: Epic Retire, Americans Moving Abroad, California Exodus, Portugal Expats
+
+### Documentation
+
+See **[docs/FACEBOOK_INTEGRATION.md](docs/FACEBOOK_INTEGRATION.md)** for:
+- Complete setup guide
+- Troubleshooting
+- Advanced usage
+- Adding custom groups
+- API reference
+
+**Note:** Facebook scraping is optional. The system works perfectly with Reddit alone if you prefer not to use Facebook.
+
 ## 📁 Project Structure
 
 ```
@@ -141,9 +189,15 @@ leadfactory-California/
 │   ├── email_tools.py     # Gmail API integration
 │   ├── calendar_tools.py  # Google Calendar/Meet
 │   ├── social_tools.py    # Reddit, LinkedIn APIs
+│   ├── facebook_tools.py  # Facebook Groups scraping (NEW)
 │   ├── web_tools.py       # Search & scraping
 │   ├── kb_tools.py        # Knowledge base queries
 │   └── task_queue.py      # Task scheduling
+├── facebook-scraper/      # Facebook scraper microservice (NEW)
+│   ├── server/            # Node.js Express server
+│   ├── package.json       # Node.js dependencies
+│   ├── README.md          # Facebook scraper docs
+│   └── *.js               # Scraper scripts
 ├── database/              # Data persistence
 │   ├── __init__.py
 │   ├── models.py          # SQLAlchemy models

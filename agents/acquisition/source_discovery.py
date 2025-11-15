@@ -46,6 +46,19 @@ You prioritize sources with high engagement and clear California/USA exit intent
             if result['success']:
                 results['added'] += 1
 
+        # Add default Facebook groups
+        for group in DEFAULT_SOURCES.get('facebook', {}).get('groups', []):
+            result = create_or_update_source(
+                platform="facebook",
+                source_name=group['name'],
+                source_type="facebook_group",
+                source_url=group['url'],
+                search_keywords=group['keywords'],
+                is_active=True
+            )
+            if result['success']:
+                results['added'] += 1
+
         # Use web search to find more forums/communities
         search_queries = [
             "california expat forum",
