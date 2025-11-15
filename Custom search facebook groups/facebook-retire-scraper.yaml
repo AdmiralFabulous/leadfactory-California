@@ -1,0 +1,152 @@
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs:
+      startWorkflow: manual
+    connections:
+      success: collect-retire-posts
+
+  collect-retire-posts:
+    type: agent
+    name: Collect Retirement Posts + Comments
+    inputs:
+      systemPrompt: |
+        You are a data collection agent. Use the Chrome DevTools MCP tools to:
+        1) Open the Facebook group page at https://www.facebook.com/groups/{{GROUP_ID_OR_PATH}}
+        2) Scroll the feed and expand posts and comments.
+        3) Extract posts that indicate timing of retirement (e.g., "retire on", dates like 12/31, month names + day, "my last day", "final day", "retiring in X weeks").
+        4) For each matching post, extract:
+           - postUrl
+           - postAuthor (display name)
+           - postAuthorUrl (profile link)
+           - postContent (full text)
+           - comments[] with: commentAuthor, commentAuthorUrl, commentText
+        5) Produce up to 500 flattened rows, one per comment (or one row with empty comment fields if none).
+
+        Requirements & Tips:
+        - Use the following actions from the Chrome DevTools tool: new_page, navigate_page, take_snapshot (optional), evaluate_script.
+        - Click expanders like "See more", "View more comments", "View more replies" before extracting.
+        - Prefer absolute URLs for post and profiles.
+        - Be resilient to dynamic DOM; use heuristics to find articles and comment containers.
+        - Return results ONLY via the provided structured output schema.
+
+      userPrompt: |
+        TARGET_GROUP_URL: https://www.facebook.com/groups/{{GROUP_ID_OR_PATH}}
+        Please return rows suitable for a spreadsheet. If some fields are missing, emit empty strings.
+
+      model: gpt-4o
+      temperature: 0.2
+      apiKey: '{{OPENAI_API_KEY}}'
+      tools:
+        - type: mcp
+          title: Chrome DevTools
+          toolId: chrome-devtools
+          operation: new_page
+          usageControl: auto
+        - type: mcp
+          title: Chrome DevTools
+          toolId: chrome-devtools
+          operation: navigate_page
+          usageControl: auto
+        - type: mcp
+          title: Chrome DevTools
+          toolId: chrome-devtools
+          operation: take_snapshot
+          usageControl: auto
+        - type: mcp
+          title: Chrome DevTools
+          toolId: chrome-devtools
+          operation: evaluate_script
+          usageControl: auto
+
+      responseFormat: |
+        {
+          "name": "retire_post_rows",
+          "strict": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "postUrl": {"type": "string"},
+                    "postAuthor": {"type": "string"},
+                    "postAuthorUrl": {"type": "string"},
+                    "postContent": {"type": "string"},
+                    "commentAuthor": {"type": "string"},
+                    "commentAuthorUrl": {"type": "string"},
+                    "commentText": {"type": "string"}
+                  },
+                  "required": ["postUrl", "postAuthor", "postAuthorUrl", "postContent", "commentAuthor", "commentAuthorUrl", "commentText"]
+                }
+              }
+            },
+            "required": ["rows"]
+          }
+        }
+    connections:
+      success: build-sheet-payload
+
+  build-sheet-payload:
+    type: function
+    name: Build Sheet Payload
+    inputs:
+      code: |
+        const out = <collectRetirePosts.content>;
+        const rows = Array.isArray(out?.rows) ? out.rows : [];
+        const values = rows.map(r => [
+          r.postUrl || "",
+          r.postAuthor || "",
+          r.postAuthorUrl || "",
+          r.postContent || "",
+          r.commentAuthor || "",
+          r.commentAuthorUrl || "",
+          r.commentText || ""
+        ]);
+        return { majorDimension: "ROWS", values };
+    connections:
+      success: write-sheets
+
+  write-sheets:
+    type: api
+    name: Write to Google Sheets
+    inputs:
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{SHEET_ID}}/values:batchUpdate"
+      method: POST
+      headers:
+        - id: sh1
+          cells: { Key: "Authorization", Value: "Bearer {{GOOGLE_SHEETS_TOKEN}}" }
+        - id: sh2
+          cells: { Key: "Content-Type", Value: "application/json" }
+      body: |
+        {
+          "valueInputOption": "USER_ENTERED",
+          "data": [
+            {
+              "range": "Sheet1!A:G",
+              "majorDimension": "ROWS",
+              "values": <buildsheetpayload.output.values>
+            }
+          ]
+        }
+      timeout: 60000
+    connections:
+      success: response
+
+  response:
+    type: response
+    name: Done
+    inputs:
+      Status Code: 200
+      Response Data: |
+        {
+          "status": "ok",
+          "written": <buildsheetpayload.output.values.length>
+        }
+
+
+

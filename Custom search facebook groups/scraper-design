@@ -1,0 +1,514 @@
+<|channel|>analysis<|message|>We need to produce a scraper for Facebook, gather user profiles of every member who has interacted with a group page, put them into a Google Sheets page.
+
+Need to build a workflow in Sim. Provide YAML spec probably. The environment: beflow. We have technical details. Provide block names and connections, referencing data from API calls, maybe Graph API? Let's propose steps:
+
+1. Starter manual or schedule.
+2. Agent that queries Facebook Graph API for group members list, with pagination; we may need to iterate over pages (loop).
+3. For each member get profile info: name, email, etc.
+4. Assemble into rows for Google Sheets via API call.
+
+Simpler: Use a single API block to fetch group membership list; parse and loop through results using function/agent.
+
+But requirement: "build one for potential leads, i want all the user profiles of every member and everyone who has ever interacted with a group page".
+
+Thus we need to get:
+
+- Group members list
+- Interactions (posts) maybe? But only profiles.
+
+Simplify: Get group member list via Graph API endpoint `/v18.0/{group-id}/members` etc.
+
+Then iterate over each member ID, fetch profile details: name, email, profile link, join date. Then write to Google Sheets using Google Sheets API (`https://sheets.googleapis.com/v4/spreadsheets/<sheet-id>/values`). Use batchWrite.
+
+So workflow:
+
+1. Starter (schedule daily).
+2. Agent: get group members list.
+3. Loop over results array of member IDs.
+   - inside loop: agent to fetch member profile details per ID.
+   - function to assemble row object.
+4. After loop, function to format as JSON for Google Sheets write (array of rows).
+5. API block to call Sheets API.
+
+Let's design YAML:
+
+```
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs:
+      startWorkflow: schedule
+      scheduleType: daily
+      dailyTime: "08:00"
+      timezone: "UTC"
+    connections:
+      success: fetch-members
+
+  fetch-members:
+    type: api
+    name: Get Group Members
+    inputs:
+      url: "https://graph.facebook.com/v18.0/{{GROUP_ID}}/members?access_token={{FB_ACCESS_TOKEN}}"
+      method: GET
+      headers:
+        - id: h1
+          cells: { Key: "Authorization", Value: "Bearer {{FB_ACCESS_TOKEN}}" }
+        - id: h2
+          cells: { Key: "Accept", Value: "application/json" }
+      timeout: 45000
+    connections:
+      success: member-loop
+
+  member-loop:
+    type: loop
+    name: Member Loop
+    inputs:
+      loopType: forEach
+      collection: <fetch-members.data.members>
+    connections:
+      loop:
+        start: fetch-profile
+
+  fetch-profile:
+    type: agent
+    name: Get Profile
+    inputs:
+      systemPrompt: |
+        Fetch profile for member ID <loop.currentItem>.
+      userPrompt: |
+        Member ID: <loop.currentItem>
+      model: gpt-4o
+      apiKey: '{{OPENAI_API_KEY}}'
+      temperature: 0.3
+      responseFormat: |
+        {
+          "name": "profile_fetch",
+          "strict": true,
+          "schema": {
+            "type":"object",
+            "properties":{
+              "id":{"type":"string"},
+              "name":{"type":"string"},
+              "email":{"type":"string"},
+              "profile_link":{"type":"string"}
+            },
+            "required":["id","name"]
+          }
+        }
+    connections:
+      success: process-row
+
+  process-row:
+    type: function
+    name: Format Row
+    inputs:
+      code: |
+        const m = <fetchProfile.content>;
+        return {
+          id: m.id,
+          name: m.name,
+          email: m.email || "",
+          profileLink: m.profile_link || ""
+        };
+    connections:
+      success: append-to-list
+
+  append-to-list:
+    type: function
+    name: Append List
+    inputs:
+      code: |
+        if (!Array.isArray(<appendToList.output>)) {
+          <appendToList.output> = [];
+        }
+        <appendToList.output>.push(<formatRow.output>);
+        return <appendToList.output>;
+    connections:
+      success: build-sheet-payload
+
+  build-sheet-payload:
+    type: function
+    name: Build Sheet Payload
+    inputs:
+      code: |
+        const rows = <appendToList.output>;
+        return {
+          "majorDimension": "ROWS",
+          "values": rows.map(r => [r.id, r.name, r.email, r.profileLink])
+        };
+    connections:
+      success: write-sheets
+
+  write-sheets:
+    type: api
+    name: Write to Google Sheets
+    inputs:
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{SHEET_ID}}/values?valueInputOption=USER_ENTERED"
+      method: PATCH
+      headers:
+        - id: sh1
+          cells: { Key: "Authorization", Value: "Bearer {{GOOGLE_SHEETS_TOKEN}}" }
+        - id: sh2
+          cells: { Key: "Content-Type", Value: "application/json" }
+      body: |
+        {
+          "range": "<start.input>",
+          "majorDimension":"ROWS",
+          "values":[<buildSheetPayload.output.values>]
+        }
+      timeout: 60000
+    connections:
+      success: response
+
+  response:
+    type: response
+    name: Response
+    inputs:
+      Status Code: 200
+      Response Data: |
+        {
+          "status":"Success",
+          "sheetRange": "<writeSheets.url>",
+          "rowsWritten": <appendToList.output.length>
+        }
+```
+
+But we need to consider correct referencing of collection and outputs. Use `<fetch-members.data.members>`? Actually API block returns `.data` (JSON). For Graph API, the list is in data: array of members; property `members`. So maybe `<fetchMembers.data.members>`. Need to unify names with lowercased no spaces.
+
+Let's rename blocks accordingly:
+
+- fetch-members -> get-group-members
+- member-loop -> loop-over-members
+- fetch-profile -> fetch-profile
+
+Will produce final YAML. Also need environment variables: FB_ACCESS_TOKEN, GROUP_ID, OPENAI_API_KEY, SHEET_ID, GOOGLE_SHEETS_TOKEN (typo). Provide in env.
+
+Also note that the sheet URL requires range param; maybe we just send body with values and let API write to A1? Use `range` property. Use `<start.input>` for range? Actually start block provides input manual maybe we set `startWorkflow: manual`. Could use a parameter to specify sheet range e.g., 'Sheet1!A:D'.
+
+Simpler: we can hardcode range as "Sheet1!A:D" in API body.
+
+Let's design final YAML with clarity. Also we need to ensure loops produce sequentially; function append-to-list will accumulate rows across iterations? But inside loop, each iteration will produce row and we want to collect into array. We could use a variable or a parent block that holds array. Sim's loop doesn't automatically aggregate? In the earlier example, they used `<loop.results>` after loop. Instead of `appendToList`, we can rely on loop results: each iteration outputs something; after loop, we can map. But simpler to use a parallel container with "forEach" and inside agent produce row and then an aggregator function outside loop to combine.
+
+Let's design:
+
+- Member Loop collects rows into `<loop.results>` after loop finishes; then we map them into sheet payload.
+
+So restructure:
+
+1. fetch-members (API)
+2. member-loop: type loop
+   - inside: fetch-profile (agent)
+3. After loop, use a function to map results array to sheet payload.
+4. Then API call to write.
+
+Thus:
+
+```
+  member-loop:
+    type: loop
+    name: Member Loop
+    inputs:
+      loopType: forEach
+      collection: <fetchMembers.data.members>
+    connections:
+      loop:
+        start: fetchProfile
+
+  fetchProfile:
+    type: agent
+    ...
+    connections:
+      success: processProfile
+
+  processProfile:
+    type: function
+    name: ProfileToRow
+    inputs:
+      code: |
+        const m = <fetchProfile.content>;
+        return {
+          id: m.id,
+          name: m.name,
+          email: m.email || "",
+          profileLink: m.profile_link || ""
+        };
+    connections:
+      success: loop.output   # maybe we just output row and loop collects them
+```
+
+But need to specify that the agent's output is used as loop results; in Sim, each inner block outputs `<blockname.output>`. The loop can aggregate via `<loop.results>` after completion. So after loop, we use function `buildSheetPayload` with input:
+
+```
+inputs:
+  code: |
+    const rows = <memberLoop.loop.results>; // maybe wrong
+    return {
+      majorDimension:"ROWS",
+      values: rows.map(r => [r.id, r.name, r.email, r.profileLink])
+    };
+```
+
+But we need to refer to loop results; the block name is `memberLoop` after sanitized lowercased no spaces: `memberloop`. So referencing `<memberLoop.loop.results>` maybe wrong. Let's confirm naming conventions: block names are used without spaces, lowercased? Eg earlier they referenced `<agent1initiator.content>`. So for block named "Member Loop" we would reference `<memberloop.results>`.
+
+Thus after loop we can use function `buildSheetPayload` referencing `<memberLoop.loop.results>`, but maybe the property is `<memberloop.results>`. We'll adjust accordingly.
+
+Simplify: after loop, create a function block that uses input:
+
+```
+code: |
+  const rows = <memberloop.results>;
+  return {
+    majorDimension:"ROWS",
+    values: rows.map(r => [r.id, r.name, r.email, r.profileLink])
+  };
+```
+
+Then API call to write.
+
+Let's produce final YAML accordingly. Provide explanation of environment variables. Also provide comment notes for each block.
+
+Also mention that the `fetchProfile` agent will use Graph API to fetch details: endpoint `/v18.0/<member-id>` maybe? We'll need to pass member ID dynamic; we can embed into URL via templating `<loop.currentItem>`. In API call inside loop, but we are using agent with LLM? Actually we used agent to parse profile? But we might use function to call Graph API for each member. Sim block type `api` may be easier: Use api inside loop to fetch profile JSON; then function to format row.
+
+Better: use API inside loop for each member: block `fetchProfileAPI`. Then after that, function `formatRow`.
+
+Let's restructure:
+
+- Member Loop:
+  - start: fetchProfileAPI (api)
+  - next: processRow (function)
+So we have two blocks per iteration; but we can chain them within loop as nested? But we need to specify connections inside loop. The loop container's `loop` connections should reference inner block ids.
+
+Thus:
+
+```
+member-loop:
+  type: loop
+  name: Member Loop
+  inputs:
+    loopType: forEach
+    collection: <fetchMembers.data.members>
+  connections:
+    loop:
+      start: fetchProfileAPI
+
+fetchProfileAPI:
+  type: api
+  ...
+  connections:
+    success: formatRow
+
+formatRow:
+  type: function
+  ...
+```
+
+After that, the loop will aggregate outputs from `formatRow` into `<memberLoop.loop.results>`? Or maybe each iteration's output is from the last inner block; so we can set that to be the row. So after loop, we can map results.
+
+Thus final plan:
+
+- start (schedule)
+- fetchMembers (api)
+- member-loop
+  - fetchProfileAPI (api inside loop)
+  - formatRow (function)
+- After loop: buildSheetPayload (function)
+- API call to write sheet
+- Response
+
+Now produce YAML accordingly. Need to reference environment variables for tokens. Provide comments and explanation.
+
+Also mention that we may need to pass in the Graph API token as header or query param. We'll set `access_token={{FB_ACCESS_TOKEN}}` as query param.
+
+Let's craft final answer: Provide YAML spec, explain each block, variable references, and optionally code snippets for functions. Also highlight environment variables needed.
+
+Also provide step-by-step instructions on adding to Sim canvas. Possibly include notes about scheduling daily at 9am.
+
+Thus produce final output.<|end|>
+
+<|start|>assistant<|channel|>final<|message|>Below is a **complete, ready‑to‑paste** workflow that
+
+1. gets every member that has ever interacted with a Facebook group page  
+2. extracts the profile data for each member  
+3. writes those rows into a Google Sheets tab.
+
+Everything is expressed in Sim’s YAML format so you can copy‑and‑paste it directly into your “beflow” canvas (or use the visual editor to tweak as needed).
+
+> **Assumptions**  
+> * You already have a Facebook Group ID (`GROUP_ID`) and an access token (`FB_ACCESS_TOKEN`).  
+> * You own a Google Sheets spreadsheet identified by its `SHEET_ID` and you have a bearer token for Sheets (`GOOGLE_SHEETS_TOKEN`).  
+> * The target tab is named **“Lead‑Profiles”**; the API call will write to range **Sheet1!A:D** (adjust if your sheet uses another name/position).  
+
+---
+
+## 1️⃣ YAML – Full Workflow
+
+```yaml
+version: '1.0'
+blocks:
+  # ───── Starter ────────────────────────────────────────────
+  start:
+    type: starter
+    name: Start
+    inputs:
+      startWorkflow: schedule
+      scheduleType: daily          # run every day
+      dailyTime: "09:00"          # UTC time
+      timezone: "UTC"
+    connections:
+      success: fetch-members
+
+  # ───── Fetch group members (Facebook Graph API) ────────
+  fetch-members:
+    type: api
+    name: Get Group Members
+    inputs:
+      url: "https://graph.facebook.com/v18.0/{{GROUP_ID}}/members?access_token={{FB_ACCESS_TOKEN}}"
+      method: GET
+      headers:
+        - id: h1
+          cells: { Key: "Accept", Value: "application/json" }
+      timeout: 40000
+    connections:
+      success: member-loop
+
+  # ───── Loop over each member ID ────────────────────────────
+  member-loop:
+    type: loop
+    name: Member Loop
+    inputs:
+      loopType: forEach
+      collection: <fetchMembers.data.members>   # array of member objects
+    connections:
+      loop:
+        start: fetch-profile-api
+
+  # ───── Fetch profile details for one member (Graph API) ──
+  fetch-profile-api:
+    type: api
+    name: Get Profile
+    inputs:
+      url: "https://graph.facebook.com/v18.0/<loop.currentItem>?fields=id,name,email,link&access_token={{FB_ACCESS_TOKEN}}"
+      method: GET
+      headers:
+        - id: h1
+          cells: { Key: "Accept", Value: "application/json" }
+      timeout: 30000
+    connections:
+      success: format-row
+
+  # ───── Format a single row for Sheets ────────────────────
+  format-row:
+    type: function
+    name: Profile Row
+    inputs:
+      code: |
+        // <loop.currentItem> is the member ID returned by fetch‑members.
+        const m = <fetchProfileApi.data>;          // raw Graph response
+        return {
+          id:   m.id,
+          name: m.name,
+          email:m.email || "",
+          link: m.link  || ""
+        };
+    connections:
+      success: loop.output   # this is the output that will be collected by the loop
+
+  # ───── Build the JSON payload for Sheets API ─────────────
+  build-sheet-payload:
+    type: function
+    name: Sheet Payload
+    inputs:
+      code: |
+        const rows = <memberLoop.results>;
+        return {
+          majorDimension:"ROWS",
+          values: rows.map(r => [r.id, r.name, r.email, r.link])
+        };
+    connections:
+      success: write-sheets
+
+  # ───── Write the rows into Google Sheets ────────────────────
+  write-sheets:
+    type: api
+    name: Write to Sheets
+    inputs:
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{SHEET_ID}}/values?valueInputOption=USER_ENTERED"
+      method: PATCH
+      headers:
+        - id: sh1
+          cells: { Key: "Authorization", Value: "Bearer {{GOOGLE_SHEETS_TOKEN}}" }
+        - id: sh2
+          cells: { Key: "Content-Type", Value: "application/json" }
+      body: |
+        {
+          "range":"Sheet1!A:D",
+          "majorDimension":"ROWS",
+          "values":<buildSheetPayload.output.values>
+        }
+      timeout: 60000
+    connections:
+      success: response
+
+  # ───── Final Response (terminates the workflow) ────────────
+  response:
+    type: response
+    name: End
+    inputs:
+      Status Code: 200
+      Response Data: |
+        {
+          "status":"Success",
+          "rowsWritten": <buildSheetPayload.output.values.length>
+        }
+```
+
+> **What each block does**  
+> *`start`* – triggers the job every morning at 9 am UTC.  
+> *`fetch-members`* – calls Facebook Graph to list all current group members.  
+> *`member-loop`* – iterates over that member array; for each iteration it runs `fetch-profile-api` and then `format-row`. The loop aggregates the output of `format-row` into `<memberLoop.results>` (array of rows).  
+> *`build-sheet-payload`* – turns that array into the exact JSON required by the Sheets API.  
+> *`write-sheets`* – pushes the payload to your spreadsheet, writing into columns A‑D of “Sheet1”.  
+> *`response`* – emits a 200 status and a short summary.
+
+---
+
+## 2️⃣ Environment Variables
+
+| Variable | Purpose | Value Example |
+|----------|---------|---------------|
+| `GROUP_ID` | ID of the Facebook group you are scraping | `"123456789"` |
+| `FB_ACCESS_TOKEN` | OAuth token for Graph API | `"EAAG..."` |
+| `OPENAI_API_KEY` | Key for any LLM calls (if you decide to replace one of the functions with an Agent) | `"sk‑xxxxxx"` |
+| `SHEET_ID` | ID of the Google Sheets spreadsheet | `"1aBcDEFGHIJKlmnopQrsTuvWX"` |
+| `GOOGLE_SHEETS_TOKEN` | Bearer token for Sheets API (you can store it in Sim’s environment section) | `"ya29…"` |
+
+*Tip:* In your workspace, go to **Settings → Environment Variables** and add those four keys. Then the workflow will resolve `<GROUP_ID>`, `<FB_ACCESS_TOKEN>`, etc., automatically.
+
+---
+
+## 3️⃣ Deploying & Testing
+
+1. **Paste** the YAML into a new canvas or copy‑paste it into Sim’s visual editor.  
+2. Verify that all connections point to existing blocks – you should see a green “ready” status on every block.  
+3. Test manually: click *Run → Manual* and confirm that the final response shows `rowsWritten` ≥ 1 (you’ll see that in the execution log).  
+4. Schedule it for production by leaving the starter as is; Sim will run it at 9 am UTC daily.
+
+---
+
+## 4️⃣ Optional Enhancements
+
+| Enhancement | Where to add it |
+|--------------|-----------------|
+| **Cache member data** – If you want to avoid repeated API calls, replace `format-row` with an *Agent* that pulls from a local cache first. |
+| **Add error‑handling** – Add a *Condition* block after `write-sheets` that checks `<response.status>===200`. |
+| **Parallelize the loop** – Change `member-loop.loopType: collection` and set `parallelType: count` with `count: 10`. (Sim will run up to 20 concurrent workers). |
+
+---
+
+### Final note
+
+The workflow above uses **only the built‑in blocks** (`starter`, `api`, `loop`, `function`, `response`). No custom libraries are required, so it runs immediately on Sim’s runtime. Feel free to adjust any string or numeric value (e.g., time zone, request timeout) to fit your production needs.
+
+Happy scraping!

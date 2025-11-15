@@ -1,0 +1,113 @@
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs:
+      startWorkflow: schedule
+      scheduleType: daily
+      dailyTime: "09:00"
+      timezone: "UTC"
+    connections:
+      success: fetch-members
+
+  fetch-members:
+    type: api
+    name: Get Group Members
+    inputs:
+      url: "https://graph.facebook.com/v18.0/{{GROUP_ID}}/members?limit=200&access_token={{FB_ACCESS_TOKEN}}"
+      method: GET
+      headers:
+        - id: h1
+          cells: { Key: "Accept", Value: "application/json" }
+      timeout: 40000
+    connections:
+      success: member-loop
+
+  member-loop:
+    type: loop
+    name: Member Loop
+    inputs:
+      loopType: forEach
+      collection: <fetchmembers.data.data>
+    connections:
+      loop:
+        start: fetch-profile-api
+      success: build-sheet-payload
+
+  fetch-profile-api:
+    type: api
+    name: Fetch Profile
+    inputs:
+      url: "https://graph.facebook.com/v18.0/<loop.currentItem.id>?fields=id,name,link&access_token={{FB_ACCESS_TOKEN}}"
+      method: GET
+      headers:
+        - id: h1
+          cells: { Key: "Accept", Value: "application/json" }
+      timeout: 30000
+    parentId: member-loop
+    connections:
+      success: format-row
+
+  format-row:
+    type: function
+    name: Format Row
+    inputs:
+      code: |
+        const m = <fetchprofileapi.data>;
+        return { id: m.id, name: m.name, link: m.link };
+    parentId: member-loop
+    connections:
+      success: loop.output
+
+  build-sheet-payload:
+    type: function
+    name: Build Sheet Payload
+    inputs:
+      code: |
+        const profiles = <memberloop.results>;
+        const values = Array.isArray(profiles)
+          ? profiles.map((p) => [p.id || "", p.name || "", "", p.link || ""]) // id, name, email(blank), link
+          : [];
+        return { majorDimension: "ROWS", values };
+    connections:
+      success: write-sheets
+
+  write-sheets:
+    type: api
+    name: Write to Google Sheets
+    inputs:
+      url: "https://sheets.googleapis.com/v4/spreadsheets/{{SHEET_ID}}/values:batchUpdate"
+      method: POST
+      headers:
+        - id: sh1
+          cells: { Key: "Authorization", Value: "Bearer {{GOOGLE_SHEETS_TOKEN}}" }
+        - id: sh2
+          cells: { Key: "Content-Type", Value: "application/json" }
+      body: |
+        {
+          "valueInputOption": "USER_ENTERED",
+          "data": [
+            {
+              "range": "Sheet1!A:D",
+              "majorDimension": "ROWS",
+              "values": <buildsheetpayload.output.values>
+            }
+          ]
+        }
+      timeout: 60000
+    connections:
+      success: response
+
+  response:
+    type: response
+    name: Response
+    inputs:
+      Status Code: 200
+      Response Data: |
+        {
+          "status": "Success",
+          "rowsWritten": <buildsheetpayload.output.values.length>
+        }
+
+

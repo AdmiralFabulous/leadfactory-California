@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Epic Retire Group Scraper - Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 2rem;
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #667eea;
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        input[type="url"] {
+            width: 100%;
+            padding: 1rem;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .progress {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+            display: none;
+        }
+        .progress.active {
+            display: block;
+        }
+        .status {
+            padding: 0.5rem;
+            margin-bottom: 1rem;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .status.connecting { background: #3b82f6; color: white; }
+        .status.navigating { background: #f59e0b; color: white; }
+        .status.loading { background: #8b5cf6; color: white; }
+        .status.scraping { background: #06b6d4; color: white; }
+        .status.parsing { background: #10b981; color: white; }
+        .status.complete { background: #10b981; color: white; }
+        .status.error { background: #ef4444; color: white; }
+        .counters {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        .counter {
+            text-align: center;
+            padding: 1rem;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        .counter-number {
+            font-size: 2rem;
+            font-weight: 800;
+            color: #667eea;
+        }
+        .counter-label {
+            font-size: 0.875rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .results {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: #e8f5e8;
+            border-radius: 8px;
+            display: none;
+        }
+        .results.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Epic Retire Group Scraper</h1>
+        <p style="text-align: center; color: #666;">Extract posts, comments, and profile URLs using Chrome DevTools MCP</p>
+        
+        <form id="scraperForm">
+            <div class="form-group">
+                <label for="url">Facebook Group URL:</label>
+                <input type="url" id="url" value="https://www.facebook.com/groups/epicretire" required>
+            </div>
+            
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="exportCSV" checked> Export to CSV files (backup)
+                </label>
+            </div>
+            
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="exportSheets"> Export to Google Sheets
+                </label>
+            </div>
+            
+            <button type="submit" id="startBtn">Start Scraping</button>
+        </form>
+        
+        <div id="progress" class="progress">
+            <div id="status" class="status">Ready</div>
+            <div id="message">Enter a Facebook group URL and click "Start Scraping"</div>
+            
+            <div class="counters">
+                <div class="counter">
+                    <div class="counter-number" id="postsCount">0</div>
+                    <div class="counter-label">Posts</div>
+                </div>
+                <div class="counter">
+                    <div class="counter-number" id="commentsCount">0</div>
+                    <div class="counter-label">Comments</div>
+                </div>
+                <div class="counter">
+                    <div class="counter-number" id="profilesCount">0</div>
+                    <div class="counter-label">Profiles</div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="results" class="results">
+            <h3>✅ Scraping Complete!</h3>
+            <div id="resultsSummary"></div>
+            <div id="csvFiles"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+        const socket = io('http://localhost:3001');
+        const form = document.getElementById('scraperForm');
+        const startBtn = document.getElementById('startBtn');
+        const progress = document.getElementById('progress');
+        const results = document.getElementById('results');
+        const statusEl = document.getElementById('status');
+        const messageEl = document.getElementById('message');
+        
+        let currentSession = null;
+        let isScrapingActive = false;
+
+        // Socket event handlers
+        socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+
+        socket.on('scraping-progress', (data) => {
+            if (data.sessionId === currentSession) {
+                updateProgress(data.status, data.message, data.progress);
+            }
+        });
+
+        socket.on('scraping-complete', (data) => {
+            if (data.sessionId === currentSession) {
+                showResults(data);
+                isScrapingActive = false;
+                startBtn.disabled = false;
+                startBtn.textContent = 'Start Scraping';
+            }
+        });
+
+        socket.on('scraping-error', (data) => {
+            if (data.sessionId === currentSession) {
+                updateProgress('error', data.error, { posts: 0, comments: 0, profiles: 0 });
+                isScrapingActive = false;
+                startBtn.disabled = false;
+                startBtn.textContent = 'Start Scraping';
+            }
+        });
+
+        // Form submission
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            if (isScrapingActive) return;
+            
+            const url = document.getElementById('url').value;
+            const exportCSV = document.getElementById('exportCSV').checked;
+            const exportSheets = document.getElementById('exportSheets').checked;
+            
+            if (!url.includes('facebook.com/groups/')) {
+                alert('Please enter a valid Facebook group URL');
+                return;
+            }
+            
+            try {
+                isScrapingActive = true;
+                startBtn.disabled = true;
+                startBtn.textContent = 'Scraping...';
+                progress.classList.add('active');
+                results.classList.remove('active');
+                
+                updateProgress('starting', 'Initializing scraper...', { posts: 0, comments: 0, profiles: 0 });
+                
+                const response = await fetch('http://localhost:3001/api/scrape', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, exportToSheets: exportSheets, exportToCSV: exportCSV })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to start scraping');
+                }
+                
+                currentSession = data.sessionId;
+                updateProgress('connecting', data.message, { posts: 0, comments: 0, profiles: 0 });
+                
+            } catch (error) {
+                updateProgress('error', error.message, { posts: 0, comments: 0, profiles: 0 });
+                isScrapingActive = false;
+                startBtn.disabled = false;
+                startBtn.textContent = 'Start Scraping';
+            }
+        });
+
+        function updateProgress(status, message, progressData) {
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = status.toUpperCase();
+            messageEl.textContent = message;
+            
+            if (progressData) {
+                document.getElementById('postsCount').textContent = progressData.posts;
+                document.getElementById('commentsCount').textContent = progressData.comments;
+                document.getElementById('profilesCount').textContent = progressData.profiles;
+            }
+        }
+
+        function showResults(data) {
+            updateProgress('complete', data.message, {
+                posts: data.data.summary.totalPosts,
+                comments: data.data.summary.totalComments,
+                profiles: data.data.summary.uniqueProfiles
+            });
+            
+            const summary = document.getElementById('resultsSummary');
+            summary.innerHTML = `
+                <p><strong>Total Posts:</strong> ${data.data.summary.totalPosts}</p>
+                <p><strong>Total Comments:</strong> ${data.data.summary.totalComments}</p>
+                <p><strong>Unique Profiles:</strong> ${data.data.summary.uniqueProfiles}</p>
+                <p><strong>Scraped At:</strong> ${new Date(data.data.summary.scrapedAt).toLocaleString()}</p>
+            `;
+            
+            if (data.csvFiles) {
+                const csvEl = document.getElementById('csvFiles');
+                csvEl.innerHTML = `
+                    <h4>📁 CSV Files Created:</h4>
+                    <p>✅ Posts: ${data.csvFiles.posts}</p>
+                    <p>✅ Comments: ${data.csvFiles.comments}</p>
+                    <p>✅ Profiles: ${data.csvFiles.profiles}</p>
+                    <p>✅ Summary: ${data.csvFiles.summary}</p>
+                    <p><small>Files saved to: <code>exports/</code> directory</small></p>
+                `;
+            }
+            
+            results.classList.add('active');
+        }
+    </script>
+</body>
+</html>

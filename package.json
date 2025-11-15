@@ -1,0 +1,35 @@
+{
+  "name": "facebook-scraper",
+  "version": "1.0.0",
+  "description": "Facebook Group Scraper with Chrome DevTools MCP and Google Sheets integration",
+  "main": "server/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "nodemon server/index.js",
+    "client:dev": "powershell -Command \"cd client; npm run dev\"",
+    "build": "powershell -Command \"cd client; npm run build\"",
+    "start": "node server/index.js",
+    "install:all": "npm install && powershell -Command \"cd client; npm install\"",
+    "test-scrape": "node test-scrape.js",
+    "dry-run": "node test-scrape-mock.js",
+    "test-csv": "node test-csv-export.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.1",
+    "chrome-devtools-mcp": "^0.4.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "googleapis": "^128.0.0",
+    "socket.io": "^4.7.5",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.0.2"
+  }
+}

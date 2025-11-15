@@ -1,0 +1,797 @@
+ok first part i need  a scraper for facebook, build one for potential leads, i want all the user profiles of every member and everyone who has ever interacted with a group page and put them into a google sheets page, i have given you the technical details for the environment we are building in beflow
+# Sim AI — End‑to‑End Technical Reference (for LLM agents)
+
+> A single, comprehensive guide to everything an LLM (and its operator) needs to design, run, and integrate Sim workflows: concepts, blocks & schemas, parameters, execution, deployment, SDKs, knowledgebase/RAG, MCP tooling, and best practices.
+
+---
+
+## 1) Platform overview
+
+**What is Sim?** A visual workflow builder and runtime for AI systems. You compose **blocks** (modules) on a canvas to build agents, automations, and data-processing pipelines—then **deploy** them as APIs, chats, webhooks, or scheduled jobs. A first‑class **YAML** format mirrors the canvas so workflows are portable and versionable.
+
+**What you can build**
+
+* AI Assistants and multi‑agent systems (LLM + tools + structured output)
+* Business automations (API calls, routing, evaluation, retries)
+* Data pipelines (ingest, transform, RAG over a knowledgebase)
+
+**Core mental model**
+
+* A **Workflow** is a directed graph of **Blocks**.
+* A **Starter** block defines how a run begins (manual, webhook, or schedule).
+* Blocks pass data via **connections**. AI/logic blocks produce outputs that downstream blocks can reference.
+* Global **Variables** and per‑block outputs are accessible anywhere using `<reference>` syntax.
+* Workflows are executed topologically with support for parallelism and branching.
+
+---
+
+## 2) YAML fundamentals (the on‑disk model)
+
+The YAML representation is the authoritative, portable form of a Sim workflow.
+
+```yaml
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs:
+      startWorkflow: manual
+    connections:
+      success: agent-1
+
+  agent-1:
+    type: agent
+    name: AI Assistant
+    inputs:
+      systemPrompt: You are a helpful assistant.
+      userPrompt: <start.input>
+      model: gpt-4o
+      apiKey: '{{OPENAI_API_KEY}}'
+```
+
+### 2.1 Referencing data
+
+* Use **block names** (lowercased, spaces removed) plus a property:
+
+  * Agent text: `<blockname.content>`
+  * Function result: `<blockname.output>`
+  * Starter input: `<start.input>`
+* Loop/Parallel context variables:
+
+  * Loop: `<loop.index>`, `<loop.currentItem>`, `<loop.items>`, `<loop.results>`
+  * Parallel: `<parallel.index>`, `<parallel.currentItem>`, `<parallel.results>`
+
+### 2.2 Environment variables
+
+* Use `{{ENV_NAME}}` for secrets/config (API keys, endpoints). Prefer envs over hard‑coding.
+
+### 2.3 Validation rules (summary)
+
+* Every block has `type`, `name`; most have `inputs` and `connections`.
+* Types/enums/number ranges are validated. Strings with URLs/tokens should be quoted.
+
+---
+
+## 3) Block catalog (modules) — behavior & parameters
+
+Below is a concise, practical reference of each Sim block type: purpose, key inputs/outputs, and YAML schema highlights.
+
+### 3.1 Starter (entry trigger)
+
+**Purpose:** Defines *how* the run starts.
+
+**Inputs**
+
+* `startWorkflow`: `manual | webhook | schedule` (default `manual`)
+* **Schedule Options** (when `schedule`):
+
+  * `scheduleType`: `hourly | daily | weekly | monthly`
+  * `hourlyMinute` (0–59)
+  * `dailyTime` (HH\:MM), `weeklyDay` (MON..SUN) + `weeklyTime`, `monthlyDay` (1–28) + `monthlyTime`
+  * `timezone` (default `UTC`)
+* **Webhook Options** (when `webhook`):
+
+  * `webhookProvider`: e.g. `slack | gmail | airtable | telegram | generic | whatsapp | github | discord | stripe`
+  * `webhookConfig`: provider‑specific config
+
+**Connections**
+
+* `success`: next block id
+
+**YAML (examples)**
+
+```yaml
+start:
+  type: starter
+  name: Start
+  inputs:
+    startWorkflow: schedule
+    scheduleType: daily
+    dailyTime: "09:00"
+    timezone: "Pacific/Auckland"
+  connections:
+    success: do-work
+```
+
+---
+
+### 3.2 Agent (LLM interaction)
+
+**Purpose:** Send prompts to an LLM, optionally use tools, and (optionally) enforce structured output.
+
+**Key inputs**
+
+* `systemPrompt` (string)
+* `userPrompt` (string; can include `<...>` references)
+* `model` (string; e.g., `gpt-4o`, `claude-3-5-sonnet-20241022`, `gemini-2.5-pro`, `deepseek-chat`, Azure OpenAI deployments, local models as supported)
+* `temperature` (number 0–2)
+* `apiKey` (`'{{ENV}}'` recommended)
+* Azure extras (when using Azure OpenAI): `azureEndpoint`, `azureApiVersion`
+* `tools` (array) — each tool:
+
+  * `type` (identifier), `title` (display), `toolId`, `operation`, `usageControl` (`auto | required | none`), optional `params`
+* `responseFormat` (JSON‑Schema object as string or object) to enforce **structured outputs**
+
+**Outputs**
+
+* `.content` (primary LLM text or structured data per `responseFormat`)
+
+**YAML (structured output)**
+
+```yaml
+data-extractor:
+  type: agent
+  name: Extract Contact Info
+  inputs:
+    systemPrompt: Extract contact info from the text.
+    userPrompt: <start.input>
+    model: gpt-4o
+    apiKey: '{{OPENAI_API_KEY}}'
+    responseFormat: |
+      {
+        "name": "contact_extraction",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "email": {"type": "string"},
+            "phone": {"type": "string"}
+          },
+          "required": ["name"]
+        }
+      }
+```
+
+---
+
+### 3.3 API (HTTP requests)
+
+**Purpose:** Call external REST APIs; capture `data`, `status`, `headers` for downstream logic.
+
+**Key inputs**
+
+* `url` (string, **quote URLs**)
+* `method`: `GET | POST | PUT | DELETE | PATCH` (default `GET`)
+* `headers`: table‑rows array: `[{ id, cells: { Key, Value } }]`
+* `params`: table‑rows array: `[{ id, cells: { Key, Value } }]` (query string)
+* `body` (string; usually JSON)
+* `timeout` (ms; default 30000; min 1000; max 300000)
+
+**Connections**
+
+* `success`: next on 2xx/OK
+* `error`: next on exception or non‑OK you handle
+
+**Outputs**
+
+* `<block.data>` (any), `<block.status>` (number), `<block.headers>` (object)
+
+**YAML (POST with body & auth)**
+
+```yaml
+create-ticket:
+  type: api
+  name: Create Support Ticket
+  inputs:
+    url: "https://api.support.com/tickets"
+    method: POST
+    headers:
+      - id: h1
+        cells: { Key: "Authorization", Value: "Bearer {{SUPPORT_API_KEY}}" }
+      - id: h2
+        cells: { Key: "Content-Type", Value: "application/json" }
+    body: |
+      {
+        "title": "<agent.title>",
+        "description": "<agent.description>",
+        "priority": "high"
+      }
+  connections:
+    success: ticket-created
+    error: ticket-error
+```
+
+---
+
+### 3.4 Function (custom code)
+
+**Purpose:** Run JavaScript/TypeScript to transform data, call libs, or format responses.
+
+**Typical inputs**
+
+* `code` (string; JS/TS), optional execution/timeouts depending on UI
+
+**Output**
+
+* `.output` (any) — the returned value from your function
+
+**Usage sketch**
+
+```yaml
+format-response:
+  type: function
+  name: Formatter
+  inputs:
+    code: |
+      const data = <apicall.data>;
+      return {
+        id: data.id,
+        email: data.email,
+        ok: <apicall.status> === 200
+      };
+```
+
+---
+
+### 3.5 Condition (boolean branching)
+
+**Purpose:** Deterministic branching using an expression that evaluates to true/false.
+
+**Inputs**
+
+* `condition`: boolean expression (may reference prior outputs/variables)
+
+**Connections**
+
+* `true`: block id
+* `false`: block id
+
+**Example**
+
+```yaml
+check-status:
+  type: condition
+  name: Check Response
+  inputs:
+    condition: <apicall.status> >= 200 && <apicall.status> < 300
+  connections:
+    true: process-success
+    false: handle-api-error
+```
+
+---
+
+### 3.6 Router (LLM routing)
+
+**Purpose:** Use an LLM to choose among multiple downstream paths based on unstructured content or intent.
+
+**Inputs**
+
+* `prompt` (instructions/criteria + content to analyze)
+* `model`, `apiKey`, optional `temperature` (default favor low, e.g., 0.1–0.3)
+* Azure OpenAI extras when applicable
+
+**Connections**
+
+* `success`: **array** of possible destinations (list of block ids). The router picks one.
+
+**Example**
+
+```yaml
+content-router:
+  type: router
+  name: Content Type Router
+  inputs:
+    prompt: |
+      Route content:
+      - questions -> question-handler
+      - complaints -> complaint-handler
+      - feedback -> feedback-handler
+      Content: <start.input>
+    model: gpt-4o
+    apiKey: '{{OPENAI_API_KEY}}'
+  connections:
+    success: [question-handler, complaint-handler, feedback-handler]
+```
+
+---
+
+### 3.7 Evaluator (LLM scoring/validation)
+
+**Purpose:** Ask an LLM to score, classify, or validate content; commonly used for quality gates and auto‑grading.
+
+**Typical inputs**
+
+* Criteria prompt, model/apiKey, optional thresholds in your logic
+
+**Patterns**
+
+* Agent → Evaluator → Condition (retry/fallback) → Response
+
+---
+
+### 3.8 Loop (sequential iteration)
+
+**Purpose:** Iterate *sequentially* over items or a fixed count.
+
+**Inputs**
+
+* `loopType`: `for | forEach`
+* For `forEach`: `collection` (array/object expression)
+* For `for`: `count` (number)
+
+**Special variables**
+
+* `<loop.currentItem>`, `<loop.index>`, `<loop.items>`, and after loop `<loop.results>`
+
+**Containment rules**
+
+* Loop is a **container**: place exactly one inner block to run each iteration.
+* Container blocks (Loop/Parallel) cannot be nested inside each other.
+
+---
+
+### 3.9 Parallel (concurrent iteration)
+
+**Purpose:** Run the same inner block across items or a count **concurrently** to speed up independent work.
+
+**Inputs**
+
+* Parallel type: `count` or `collection`
+* `count`: number of instances
+* `collection`: array/object to distribute
+
+**Special variables**
+
+* `<parallel.currentItem>`, `<parallel.index>`, and aggregate `<parallel.results>`
+
+**Constraints & tips**
+
+* Max **20** concurrent instances.
+* **Do not** nest container blocks (Loop/Parallel) inside one another.
+* Beware of external API rate limits and memory usage.
+
+---
+
+### 3.10 Workflow (sub‑workflow call)
+
+**Purpose:** Execute another workflow as a reusable component (modular composition). Child runs in an isolated context and returns a result.
+
+**Inputs**
+
+* `workflow` selection and optional input payload (`start.input` for child)
+
+**Outputs**
+
+* `.result` (primary output from the child workflow) plus status/error fields
+
+**Notes**
+
+* Cycle detection prevents recursive loops.
+
+---
+
+### 3.11 Response (terminal API response)
+
+**Purpose:** The “return statement” for API/webhook workflows. Formats status/body/headers and **ends** execution.
+
+**Inputs**
+
+* `Response Data` (JSON builder or editor; may reference variables/outputs `<...>`)
+* `Status Code` (default 200)
+* `Headers` (key/value)
+
+**Outputs**
+
+* Sends HTTP response to the caller; terminates workflow.
+
+**Example body template**
+
+```json
+{
+  "user": {"id": "<variable.userId>", "name": "<variable.userName>"},
+  "result": "<agent.content>",
+  "tookMs": "<variable.executionTime>"
+}
+```
+
+---
+
+## 4) Variables (global state) & environment configuration
+
+### 4.1 Workflow Variables
+
+* Global, named variables accessible from any block.
+* Use via dropdown or by typing `<` and selecting the variable.
+* Data types: text, number, boolean, object, array.
+* Best practices: descriptive names, initialize early, validate presence, keep set small for clarity.
+
+### 4.2 Environment Variables
+
+* Store secrets/config like API keys and endpoints.
+* Reference with `{{ENV_NAME}}` in YAML.
+
+---
+
+## 5) Execution, deployment & calling workflows
+
+### 5.1 How runs execute
+
+* **Topological execution**: Dependencies first; engine can execute layers in parallel when possible.
+* **Path tracking**: Condition/Router decide which branches are active.
+* **Execution context**: tracks block outputs, variables, loop/parallel state, routes.
+
+### 5.2 Triggers
+
+* Manual (editor testing)
+* **Deploy as API** (HTTP endpoint with API key)
+* **Deploy as Chat** (hosted UI at `https://your-name.sim.ai`, optional auth, streaming)
+* Webhooks (third‑party events)
+* Scheduled (cron‑like via Starter schedule)
+
+### 5.3 REST API (execute a workflow)
+
+```bash
+curl -X POST "https://sim.ai/api/workflows/<WORKFLOW_ID>/execute" \
+  -H "X-API-Key: <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"input": {"message": "Hello"}}'
+```
+
+### 5.4 Programmatic execution (SDKs)
+
+#### TypeScript/JavaScript (Node & browser)
+
+```ts
+import { SimStudioClient } from 'simstudio-ts-sdk';
+
+// Example env bootstrap (no placeholders omitted)
+process.env.SIMSTUDIO_API_KEY = process.env.SIMSTUDIO_API_KEY || 'TEST_API_KEY_EXAMPLE';
+
+const client = new SimStudioClient({ apiKey: process.env.SIMSTUDIO_API_KEY!, baseUrl: 'https://sim.ai' });
+
+async function run() {
+  // Validate deployment status before execution
+  const ready = await client.validateWorkflow('workflow-id-123');
+  if (!ready) throw new Error('Workflow is not deployed');
+
+  const result = await client.executeWorkflow('workflow-id-123', {
+    input: { message: 'Process this data' },
+    timeout: 30_000
+  });
+
+  if (result.success) {
+    console.log('Output', result.output); // structured body if Response block used
+    console.log('Duration', result.metadata?.duration);
+  } else {
+    console.error('Error', result.error);
+  }
+}
+
+run().catch(console.error);
+```
+
+**Client methods (common):** `executeWorkflow(workflowId, { input, timeout })`, `getWorkflowStatus(workflowId)`, `validateWorkflow(workflowId)`, `setApiKey()`, `setBaseUrl()`.
+
+#### Python
+
+```python
+import os
+from simstudio import SimStudioClient
+
+# Example env bootstrap (no placeholders omitted)
+os.environ.setdefault('SIMSTUDIO_API_KEY', 'TEST_API_KEY_EXAMPLE')
+
+client = SimStudioClient(api_key=os.environ['SIMSTUDIO_API_KEY'], base_url='https://sim.ai')
+
+# Validate before executing
+if client.validate_workflow('workflow-id-123'):
+    result = client.execute_workflow('workflow-id-123', input_data={"message": "Hello from Python"}, timeout=30.0)
+    if result.success:
+        print('Output', result.output)
+        print('Duration', (result.metadata or {}).get('duration'))
+    else:
+        print('Error', result.error)
+else:
+    raise RuntimeError('Workflow is not deployed')
+```
+
+**Execution model:** at present executions are synchronous in both SDKs.
+
+---
+
+## 6) Knowledgebase (RAG) — ingest, search, ground
+
+**Purpose:** Upload and manage documents; Sim performs text extraction, intelligent **chunking** (size/overlap configurable in UI), and **embedding** for semantic search. Use in workflows via tools/agents that query your knowledgebase.
+
+**Supported file types (typical):** PDF, DOC/DOCX, TXT, MD, HTML, XLS/XLSX, PPT/PPTX, CSV. PDF OCR is supported for scans. File size up to \~100MB (best under 50MB).
+
+**Tags & filtering:** Create custom tags and filter retrieval to relevant subsets. Up to **7 tag slots** per knowledgebase; combine semantic search with tag filters for precision.
+
+**Practical pattern**
+
+* Pre‑filter with tags (e.g., `product=alpha`, `region=anz`)
+* Retrieve top‑k chunks → pass into Agent as context → enforce `responseFormat` for structured answers
+
+---
+
+## 7) MCP (Model Context Protocol) — external tools via standard protocol
+
+**What is MCP?** An open standard that lets AI agents securely connect to external tools/data sources through **MCP servers**.
+
+**Ways to add MCP servers**
+
+* Workspace settings → **MCP Servers** → Add server config (available to members by permission)
+* Use the dedicated **MCP Tool** in workflows once servers are configured (category: `tools`, type: `mcp`).
+
+**Usage**
+
+* Configure servers at workspace level → reference tools from Agent `tools` list or add an **MCP Tool** block to invoke MCP methods as part of a flow.
+
+---
+
+## 8) Execution logging & cost awareness (ops)
+
+* **Logs & traces:** Use the Execution view to inspect per‑block logs, paths taken, durations, errors.
+* **Cost estimation:** Track/optimize model/tool usage; prefer low‑temp for routing, cache repeated calls, parallelize independent work.
+* **Reliability:** Use `error` connections; add Evaluator + Condition to guard quality; implement retries/backoffs in Function/API logic.
+
+---
+
+## 9) End‑to‑end reference examples
+
+### 9.1 Multi‑agent chain (YAML)
+
+```yaml
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs:
+      startWorkflow: manual
+    connections:
+      success: agent-1-initiator
+
+  agent-1-initiator:
+    type: agent
+    name: Agent 1 Initiator
+    inputs:
+      systemPrompt: You are the first agent in a chain.
+      userPrompt: |
+        Input to process: <start.input>
+      model: gpt-4o
+      temperature: 0.7
+      apiKey: '{{OPENAI_API_KEY}}'
+    connections:
+      success: agent-2-enhancer
+
+  agent-2-enhancer:
+    type: agent
+    name: Agent 2 Enhancer
+    inputs:
+      systemPrompt: You are the second agent. Enhance prior output.
+      userPrompt: <agent1initiator.content>
+      model: gpt-4o
+      temperature: 0.7
+      apiKey: '{{OPENAI_API_KEY}}'
+    connections:
+      success: agent-3-refiner
+
+  agent-3-refiner:
+    type: agent
+    name: Agent 3 Refiner
+    inputs:
+      systemPrompt: Refine & structure the text.
+      userPrompt: <agent2enhancer.content>
+      model: gpt-4o
+      temperature: 0.6
+      apiKey: '{{OPENAI_API_KEY}}'
+    connections:
+      success: response
+
+  response:
+    type: response
+    name: Return
+    inputs:
+      Status Code: 200
+      Response Data: |
+        { "final": "<agent3refiner.content>" }
+```
+
+### 9.2 Router with multiple targets (YAML)
+
+```yaml
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs: { startWorkflow: manual }
+    connections: { success: router }
+
+  router:
+    type: router
+    name: Intent Router
+    inputs:
+      prompt: |
+        If input is a question -> q-agent
+        If instruction -> cmd-agent
+        Else -> smalltalk-agent
+        Content: <start.input>
+      model: gpt-4o
+      apiKey: '{{OPENAI_API_KEY}}'
+    connections:
+      success: [q-agent, cmd-agent, smalltalk-agent]
+```
+
+### 9.3 API → Condition → Function → Response (YAML)
+
+```yaml
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs: { startWorkflow: manual }
+    connections: { success: fetch }
+
+  fetch:
+    type: api
+    name: Fetch User
+    inputs:
+      url: "https://api.example.com/users/123"
+      method: GET
+      headers:
+        - id: h1
+          cells: { Key: "Authorization", Value: "Bearer {{API_TOKEN}}" }
+    connections:
+      success: ok?
+      error: api-error
+
+  ok?:
+    type: condition
+    name: Status OK?
+    inputs: { condition: <fetch.status> >= 200 && <fetch.status> < 300 }
+    connections: { true: shape, false: api-error }
+
+  shape:
+    type: function
+    name: Shape Output
+    inputs:
+      code: |
+        const u = <fetch.data>;
+        return { id: u.id, email: u.email, active: true };
+    connections: { success: respond }
+
+  api-error:
+    type: function
+    name: API Error
+    inputs:
+      code: |
+        return { error: true, status: <fetch.status>, data: <fetch.data> };
+    connections: { success: respond }
+
+  respond:
+    type: response
+    name: Respond
+    inputs:
+      Status Code: 200
+      Response Data: |
+        { "result": "<shape.output>", "error": "<apierror.output>" }
+```
+
+### 9.4 Loop & Parallel patterns (YAML)
+
+```yaml
+# Loop (sequential)
+version: '1.0'
+blocks:
+  start:
+    type: starter
+    name: Start
+    inputs: { startWorkflow: manual }
+    connections: { success: items-loop }
+
+  items-loop:
+    type: loop
+    name: Items Loop
+    inputs: { loopType: forEach, collection: '["a","b","c"]' }
+    connections:
+      loop:
+        start: process-item
+
+  process-item:
+    type: agent
+    name: Per Item
+    inputs:
+      systemPrompt: Echo the item.
+      userPrompt: <loop.currentItem>
+      model: gpt-4o
+      apiKey: '{{OPENAI_API_KEY}}'
+    parentId: items-loop
+```
+
+```yaml
+# Parallel (concurrent)
+version: '1.0'
+blocks:
+  start: { type: starter, name: Start, inputs: { startWorkflow: manual }, connections: { success: run } }
+
+  run:
+    type: parallel
+    name: Fanout
+    inputs: { parallelType: collection, collection: '[1,2,3,4]' }
+    connections:
+      loop:
+        start: worker
+
+  worker:
+    type: function
+    name: Worker
+    inputs:
+      code: |
+        const i = <parallel.currentItem>;
+        return { i, square: i*i };
+    parentId: run
+```
+
+---
+
+## 10) Best practices (for LLM authors)
+
+* **Routing:** Prefer low temperatures for Routers. Describe routing criteria explicitly in the `prompt`.
+* **Structured outputs:** Use `responseFormat` JSON‑Schema for deterministic parsing.
+* **Quoting:** Quote URLs/tokens and any string with special characters in YAML.
+* **Secrets:** Always reference `{{ENV}}` and manage real values outside YAML.
+* **Error handling:** Provide `error` connections; validate HTTP `status`; add Conditions for gates.
+* **Parallelism:** Use Parallel for independent work; respect external rate limits; keep under 20 concurrent.
+* **Modularity:** Extract reusable flows with the Workflow block; avoid deep nesting.
+* **Observability:** Add logging in Function blocks; inspect Execution → Logs; track durations and costs.
+* **Variables:** Keep the global set small and well‑named; document purpose; init early.
+* **Knowledgebase:** Tag documents and filter retrieval to cut hallucinations; ground answers with retrieved chunks.
+* **MCP:** Register servers at workspace level; gate tool usage using `usageControl` where safety is a concern.
+
+---
+
+## 11) Quick checklist for production
+
+* [ ] Deployed as API/Chat; endpoint verified
+* [ ] API key scope & rotation policy set
+* [ ] Response block shapes stable for clients
+* [ ] Guardrails: Evaluator + Condition on critical paths
+* [ ] Retries/backoffs around flaky APIs
+* [ ] Parallel fan‑out complies with partner rate limits
+* [ ] Logs & alerts wired; sample payloads covered
+* [ ] Knowledgebase tags/filters curated; re‑index policy defined
+* [ ] MCP servers configured; least‑privilege tool access
+
+---
+
+## 12) Glossary of common outputs (quick reference)
+
+* **Agent** → `<agent.content>`
+* **API** → `<api.data>`, `<api.status>`, `<api.headers>`
+* **Function** → `<fn.output>`
+* **Condition/Router** → no direct output (control‑flow only)
+* **Loop** → iteration vars (`<loop.*>`), aggregated `<loop.results>`
+* **Parallel** → iteration vars (`<parallel.*>`), aggregated `<parallel.results>`
+* **Workflow** → `<workflow.result>`
+* **Starter** → `<start.input>`
+* **Response** → terminal HTTP reply
+
+---
+
+*This reference is designed for both human and model consumption. It contains full examples without ellipses or omitted parts so an LLM can learn/operate Sim workflows end‑to‑end.*
